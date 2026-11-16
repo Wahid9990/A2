@@ -349,27 +349,27 @@ class ScreenCaptureService : Service() {
         // Flush any frame from during the hold so post-jump burst captures the real touchdown
         clearCachedFrame()
 
-        // Wait past airborne arc (~550ms) so burst captures true grounded touchdown before/as camera pans
-        delay(620L)
+        // Sample right at touchdown (490ms & 570ms) before the camera pan slides the pawn back toward 0.0
+        delay(490L)
         val burst1 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = false)?.first
         val r1 = JumpTrainer.computeLandingRatio(stableResult, burst1)
 
-        delay(140L)
+        delay(80L)
         val burst2 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
         val r2 = JumpTrainer.computeLandingRatio(stableResult, burst2)
 
         val landingRatio = when {
             r1 != null && r2 != null -> when {
-                abs(r1 - r2) <= 0.06f -> (r1 + r2) / 2f
-                r2 < r1 - 0.06f -> r1
+                abs(r1 - r2) <= 0.05f -> (r1 + r2) / 2f
+                r2 < r1 - 0.05f -> r1
                 else -> r2
             }
-            r2 != null -> r2
-            else -> r1
+            r1 != null -> r1
+            else -> r2
         }
 
         // Wait remaining cooldown for camera pan / Game Over popup to finish settling
-        val remainingCooldown = (config.jumpCooldownMs - 760L).coerceAtLeast(450L)
+        val remainingCooldown = (config.jumpCooldownMs - 570L).coerceAtLeast(450L)
         delay(remainingCooldown)
         val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
 

@@ -18,6 +18,8 @@ object JumpTrainer {
     private const val MAX_K = 2.15f
     private const val MIN_B = -15f
     private const val MAX_B = 75f
+    private const val ANCHOR_K = 1.48f
+    private const val MAX_AUTO_K_STEP = 0.055f
 
     /**
      * Measures how far the pawn landed along the exact jump vector from pre-jump pawn to
@@ -60,6 +62,11 @@ object JumpTrainer {
         }
 
         if (landingRatio != null) {
+            // A pawn that survived on the block cannot physically land at r < 0.72;
+            // values below 0.72 after surviving mean camera pan already slid the block back.
+            if (landingRatio < 0.72f && postSettled?.pawnFound == true) {
+                return JumpOutcome.CENTER
+            }
             return when {
                 landingRatio < 0.89f -> JumpOutcome.SHORT
                 landingRatio <= 1.11f -> JumpOutcome.CENTER
@@ -83,7 +90,9 @@ object JumpTrainer {
 
     /**
      * Self-training online update step using bounded normalized LMS + clean-only damped regression.
-     * Fatal OUT outcomes always step away from the failure and never get neutralized by stale OLS or "Dead center".
+     * - Rejects impossible camera-panned ratios (r < 0.72 when pawn survived).
+     * - Caps per-jump k delta to prevent runaway spikes.
+     * - Self-recovers on OUT / OUT_UNKNOWN so the same fatal hold is never repeated blindly.
      */
     fun applyOnlineUpdate(
         config: BotConfig,
@@ -102,12 +111,13 @@ object JumpTrainer {
         val isFatalOut = outcome == JumpOutcome.OUT_SHORT ||
             outcome == JumpOutcome.OUT_OVERSHOOT ||
             outcome == JumpOutcome.OUT_UNKNOWN
+        var allowLargeRecovery = false
         var note = "Keep"
 
         when {
             outcome == JumpOutcome.OUT_SHORT -> {
                 if (landingRatio != null && landingRatio in 0.45f..0.95f) {
-                    val safeRatio = landingRatio.coerceIn(0.60f, 0.92f)
+                    val safeRatio = landingRatio.coerceIn(0.68f, 0.92f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
                     val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.48f).coerceAtLeast(18f)
@@ -122,34 +132,69 @@ object JumpTrainer {
             }
 
             outcome == JumpOutcome.OUT_OVERSHOOT -> {
+                allowLargeRecovery = true
                 if (landingRatio != null && landingRatio in 1.06f..1.65f) {
                     val safeRatio = landingRatio.coerceIn(1.07f, 1.45f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
-                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.48f).coerceAtMost(-18f)
+                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.50f).coerceAtMost(-20f)
                     newK += (deltaMs * 0.85f) / dNorm.coerceAtLeast(150f)
                     newB += deltaMs * 0.15f
                     note = String.format(Locale.US, "Out-far LMS r=%.2f %.0fms", landingRatio, deltaMs)
                 } else {
-                    newK -= 0.045f
+                    newK -= 0.055f
                     newB -= 6f
                     note = "Out-far guard (-k,-b)"
                 }
             }
 
             outcome == JumpOutcome.OUT_UNKNOWN -> {
-                note = "Out guard (excluded from OLS)"
+                allowLargeRecovery = true
+                val effK = holdMs.toFloat() / dNorm.coerceAtLeast(150f)
+                val prev = history.firstOrNull()
+                val sameSpotRepeatOut = prev != null &&
+                    (prev.outcome == JumpOutcome.OUT_UNKNOWN || prev.outcome == JumpOutcome.OUT_OVERSHOOT || prev.outcome == JumpOutcome.OUT_SHORT) &&
+                    abs(prev.normalizedDistancePx - dNorm) <= 35f
+
+                when {
+                    effK > ANCHOR_K + 0.08f || config.kFactor > ANCHOR_K + 0.08f -> {
+                        val pull = ((config.kFactor - ANCHOR_K) * 0.45f).coerceIn(0.055f, 0.14f)
+                        newK -= pull
+                        newB -= if (sameSpotRepeatOut) 8f else 4f
+                        note = String.format(Locale.US, "Out-over recovery (-%.3f k)", pull)
+                    }
+                    effK < ANCHOR_K - 0.12f || config.kFactor < ANCHOR_K - 0.12f -> {
+                        val pull = ((ANCHOR_K - config.kFactor) * 0.45f).coerceIn(0.055f, 0.14f)
+                        newK += pull
+                        newB += if (sameSpotRepeatOut) 8f else 4f
+                        note = String.format(Locale.US, "Out-short recovery (+%.3f k)", pull)
+                    }
+                    sameSpotRepeatOut -> {
+                        // Gentle perturbation toward anchor if repeated OUT happens near nominal slope
+                        val nudge = if (config.kFactor >= ANCHOR_K) -0.05f else 0.05f
+                        newK += nudge
+                        note = String.format(Locale.US, "Repeat-out nudge (%.3f)", nudge)
+                    }
+                    else -> {
+                        note = "Out guard (near nominal)"
+                    }
+                }
             }
 
-            landingRatio != null && landingRatio in 0.45f..1.65f -> {
+            landingRatio != null && landingRatio < 0.72f -> {
+                // Survived with r < 0.72 => camera already panned back before burst captured pawn
+                note = String.format(Locale.US, "Pan-drifted (r=%.2f ignored)", landingRatio)
+            }
+
+            landingRatio != null && landingRatio in 0.72f..1.65f -> {
                 val errorRatio = 1.0f - landingRatio
                 if (abs(errorRatio) <= 0.045f) {
                     note = String.format(Locale.US, "Dead center (r=%.2f)", landingRatio)
                 } else {
-                    val safeRatio = landingRatio.coerceIn(0.60f, 1.45f)
+                    val safeRatio = landingRatio.coerceIn(0.74f, 1.40f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
-                    val gain = if (outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER) 0.45f else 0.32f
+                    val gain = if (outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER) 0.42f else 0.30f
                     val deltaMs = (idealHoldMs - holdMs.toFloat()) * gain
 
                     newK += (deltaMs * 0.85f) / dNorm.coerceAtLeast(150f)
@@ -166,13 +211,14 @@ object JumpTrainer {
         }
 
         // Damped 2-parameter OLS blend ONLY over clean landed jumps since the latest manual override
-        if (!isFatalOut) {
+        val validForOls = !isFatalOut && (landingRatio == null || landingRatio >= 0.72f)
+        if (validForOls) {
             val fitSamples = history.asSequence()
                 .takeWhile { it.outcome != JumpOutcome.USER_SHORT && it.outcome != JumpOutcome.USER_LONG }
                 .filter {
                     (it.outcome == JumpOutcome.CENTER || it.outcome == JumpOutcome.SHORT || it.outcome == JumpOutcome.PAST_CENTER) &&
                         it.landingRatio != null &&
-                        it.landingRatio in 0.60f..1.45f &&
+                        it.landingRatio in 0.72f..1.40f &&
                         it.normalizedDistancePx >= 150f
                 }
                 .take(18)
@@ -192,7 +238,9 @@ object JumpTrainer {
             }
         }
 
-        newK = ((newK.coerceIn(MIN_K, MAX_K)) * 1000f).roundToInt() / 1000f
+        val maxStep = if (allowLargeRecovery) 0.15f else MAX_AUTO_K_STEP
+        val clampedStepK = (newK - config.kFactor).coerceIn(-maxStep, maxStep)
+        newK = (((config.kFactor + clampedStepK).coerceIn(MIN_K, MAX_K)) * 1000f).roundToInt() / 1000f
         newB = ((newB.coerceIn(MIN_B, MAX_B)) * 10f).roundToInt() / 10f
 
         val updated = config.copy(

@@ -253,4 +253,39 @@ class JumpTrainerTest {
         )
         assertEquals("Older pre-manual records must not drag k back down via OLS ($note)", manualCfg.kFactor, afterCenter.kFactor, 0.001f)
     }
+
+    @Test
+    fun `OUT_UNKNOWN with high hold immediately recovers k downward and never repeats fatal hold`() {
+        val highCfg = BotConfig(kFactor = 2.069f, offsetMs = 42f, autoTrainEnabled = true)
+        val (recovered, note) = JumpTrainer.applyOnlineUpdate(
+            config = highCfg,
+            dNorm = 576f,
+            holdMs = 1234L,
+            outcome = JumpOutcome.OUT_UNKNOWN,
+            landingRatio = null,
+            history = emptyList()
+        )
+        assertTrue("OUT_UNKNOWN with k=2.069 must pull k down ($note)", recovered.kFactor <= highCfg.kFactor - 0.055f)
+        assertTrue("OUT_UNKNOWN must pull b down ($note)", recovered.offsetMs < highCfg.offsetMs)
+    }
+
+    @Test
+    fun `surviving pan-drifted ratio below 0_72 does not spike k upward`() {
+        val cfg = BotConfig(kFactor = 1.48f, offsetMs = 2f, autoTrainEnabled = true)
+        val pre = makeResult(px = 218f, py = 954f, bx = 548f, by = 755f, dRaw = 385f, dNorm = 577f)
+        val postSettled = makeResult(px = 218f, py = 954f, bx = 520f, by = 770f)
+
+        val outcome = JumpTrainer.classifyOutcome(pre, landingRatio = 0.57f, postSettled = postSettled)
+        assertEquals("Surviving with r=0.57 must be classified as pan-drifted CENTER, not SHORT", JumpOutcome.CENTER, outcome)
+
+        val (updated, note) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 544f,
+            holdMs = 808L,
+            outcome = outcome,
+            landingRatio = 0.57f,
+            history = emptyList()
+        )
+        assertEquals("Pan-drifted ratio 0.57 must not spike k ($note)", cfg.kFactor, updated.kFactor, 0.001f)
+    }
 }
