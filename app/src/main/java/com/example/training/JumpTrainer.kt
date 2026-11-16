@@ -14,10 +14,10 @@ import kotlin.math.roundToInt
 
 object JumpTrainer {
 
-    private const val MIN_K = 0.70f
-    private const val MAX_K = 2.30f
-    private const val MIN_B = -60f
-    private const val MAX_B = 140f
+    private const val MIN_K = 0.85f
+    private const val MAX_K = 2.15f
+    private const val MIN_B = -15f
+    private const val MAX_B = 75f
 
     /**
      * Measures how far the pawn landed along the exact jump vector from pre-jump pawn to
@@ -82,7 +82,8 @@ object JumpTrainer {
     }
 
     /**
-     * Self-training online update step using bounded normalized LMS + damped linear regression blend.
+     * Self-training online update step using bounded normalized LMS + clean-only damped regression.
+     * Fatal OUT outcomes always step away from the failure and never get neutralized by stale OLS or "Dead center".
      */
     fun applyOnlineUpdate(
         config: BotConfig,
@@ -98,47 +99,95 @@ object JumpTrainer {
 
         var newK = config.kFactor
         var newB = config.offsetMs
+        val isFatalOut = outcome == JumpOutcome.OUT_SHORT ||
+            outcome == JumpOutcome.OUT_OVERSHOOT ||
+            outcome == JumpOutcome.OUT_UNKNOWN
         var note = "Keep"
 
-        if (landingRatio != null && landingRatio in 0.45f..1.65f) {
-            val errorRatio = 1.0f - landingRatio
-            if (abs(errorRatio) <= 0.045f) {
-                note = String.format(Locale.US, "Dead center (r=%.2f)", landingRatio)
-            } else {
-                val safeRatio = landingRatio.coerceIn(0.60f, 1.45f)
-                val idealHoldMs = (holdMs.toFloat() / safeRatio)
-                    .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
-                val deltaMs = (idealHoldMs - holdMs.toFloat()) * 0.35f
-
-                newK += (deltaMs * 0.78f) / dNorm.coerceAtLeast(150f)
-                newB += deltaMs * 0.22f
-                note = String.format(Locale.US, "LMS r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+        when {
+            outcome == JumpOutcome.OUT_SHORT -> {
+                if (landingRatio != null && landingRatio in 0.45f..0.95f) {
+                    val safeRatio = landingRatio.coerceIn(0.60f, 0.92f)
+                    val idealHoldMs = (holdMs.toFloat() / safeRatio)
+                        .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
+                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.48f).coerceAtLeast(18f)
+                    newK += (deltaMs * 0.85f) / dNorm.coerceAtLeast(150f)
+                    newB += deltaMs * 0.15f
+                    note = String.format(Locale.US, "Out-short LMS r=%.2f +%.0fms", landingRatio, deltaMs)
+                } else {
+                    newK += 0.045f
+                    newB += 6f
+                    note = "Out-short guard (+k,+b)"
+                }
             }
-        } else if (outcome == JumpOutcome.OUT_SHORT || outcome == JumpOutcome.SHORT) {
-            newK += 0.04f
-            newB += 12f
-            note = "Short fallback (+k,+b)"
-        } else if (outcome == JumpOutcome.OUT_OVERSHOOT) {
-            newK -= 0.04f
-            newB -= 12f
-            note = "Overshoot fallback (-k,-b)"
+
+            outcome == JumpOutcome.OUT_OVERSHOOT -> {
+                if (landingRatio != null && landingRatio in 1.06f..1.65f) {
+                    val safeRatio = landingRatio.coerceIn(1.07f, 1.45f)
+                    val idealHoldMs = (holdMs.toFloat() / safeRatio)
+                        .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
+                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.48f).coerceAtMost(-18f)
+                    newK += (deltaMs * 0.85f) / dNorm.coerceAtLeast(150f)
+                    newB += deltaMs * 0.15f
+                    note = String.format(Locale.US, "Out-far LMS r=%.2f %.0fms", landingRatio, deltaMs)
+                } else {
+                    newK -= 0.045f
+                    newB -= 6f
+                    note = "Out-far guard (-k,-b)"
+                }
+            }
+
+            outcome == JumpOutcome.OUT_UNKNOWN -> {
+                note = "Out guard (excluded from OLS)"
+            }
+
+            landingRatio != null && landingRatio in 0.45f..1.65f -> {
+                val errorRatio = 1.0f - landingRatio
+                if (abs(errorRatio) <= 0.045f) {
+                    note = String.format(Locale.US, "Dead center (r=%.2f)", landingRatio)
+                } else {
+                    val safeRatio = landingRatio.coerceIn(0.60f, 1.45f)
+                    val idealHoldMs = (holdMs.toFloat() / safeRatio)
+                        .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
+                    val gain = if (outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER) 0.45f else 0.32f
+                    val deltaMs = (idealHoldMs - holdMs.toFloat()) * gain
+
+                    newK += (deltaMs * 0.85f) / dNorm.coerceAtLeast(150f)
+                    newB += deltaMs * 0.15f
+                    note = String.format(Locale.US, "LMS r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                }
+            }
+
+            outcome == JumpOutcome.SHORT -> {
+                newK += 0.040f
+                newB += 6f
+                note = "Short fallback (+k,+b)"
+            }
         }
 
-        // Damped 2-parameter OLS blend once we have >= 4 clean ratio samples spanning >= 100px distance
-        val fitSamples = history.asSequence()
-            .filter { it.landingRatio != null && it.landingRatio in 0.50f..1.55f && it.normalizedDistancePx >= 120f }
-            .take(18)
-            .toList()
+        // Damped 2-parameter OLS blend ONLY over clean landed jumps since the latest manual override
+        if (!isFatalOut) {
+            val fitSamples = history.asSequence()
+                .takeWhile { it.outcome != JumpOutcome.USER_SHORT && it.outcome != JumpOutcome.USER_LONG }
+                .filter {
+                    (it.outcome == JumpOutcome.CENTER || it.outcome == JumpOutcome.SHORT || it.outcome == JumpOutcome.PAST_CENTER) &&
+                        it.landingRatio != null &&
+                        it.landingRatio in 0.60f..1.45f &&
+                        it.normalizedDistancePx >= 150f
+                }
+                .take(18)
+                .toList()
 
-        if (fitSamples.size >= 4) {
-            val minD = fitSamples.minOf { it.normalizedDistancePx }
-            val maxD = fitSamples.maxOf { it.normalizedDistancePx }
-            if (maxD - minD >= 100f) {
-                val fitted = weightedLinearFit(fitSamples, config)
-                if (fitted != null) {
-                    newK = newK * 0.78f + fitted.first * 0.22f
-                    newB = newB * 0.78f + fitted.second * 0.22f
-                    note += " + OLS"
+            if (fitSamples.size >= 4) {
+                val minD = fitSamples.minOf { it.normalizedDistancePx }
+                val maxD = fitSamples.maxOf { it.normalizedDistancePx }
+                if (maxD - minD >= 100f) {
+                    val fitted = weightedLinearFit(fitSamples, config)
+                    if (fitted != null) {
+                        newK = newK * 0.86f + fitted.first * 0.14f
+                        newB = newB * 0.86f + fitted.second * 0.14f
+                        note += " + OLS"
+                    }
                 }
             }
         }
@@ -161,13 +210,15 @@ object JumpTrainer {
     ): Triple<BotConfig, JumpTelemetryRecord?, String> {
         val dNorm = lastRecord?.normalizedDistancePx?.takeIf { it >= 100f } ?: 500f
         val deltaHoldMs = if (isShort) 42f else -42f
-        val newK = (((config.kFactor + (deltaHoldMs * 0.75f) / dNorm).coerceIn(MIN_K, MAX_K)) * 1000f).roundToInt() / 1000f
-        val newB = (((config.offsetMs + deltaHoldMs * 0.25f).coerceIn(MIN_B, MAX_B)) * 10f).roundToInt() / 10f
+        val newK = (((config.kFactor + (deltaHoldMs * 0.82f) / dNorm).coerceIn(MIN_K, MAX_K)) * 1000f).roundToInt() / 1000f
+        val newB = (((config.offsetMs + deltaHoldMs * 0.18f).coerceIn(MIN_B, MAX_B)) * 10f).roundToInt() / 10f
 
         val updatedCfg = config.copy(kFactor = newK, offsetMs = newB)
         val outcome = if (isShort) JumpOutcome.USER_SHORT else JumpOutcome.USER_LONG
+        // Clear stale sensor ratio on manually overridden records so it never pulls OLS the wrong way
         val updatedRec = lastRecord?.copy(
             outcome = outcome,
+            landingRatio = null,
             kAfter = newK,
             bAfter = newB,
             note = "Manual HUD: ${if (isShort) "Too Short (+k)" else "Too Long (-k)"}"
@@ -194,10 +245,10 @@ object JumpTrainer {
         var sxx = 0.0
         var sxy = 0.0
         for (rec in samples) {
-            val r = (rec.landingRatio ?: continue).coerceIn(0.55f, 1.50f)
+            val r = (rec.landingRatio ?: continue).coerceIn(0.60f, 1.45f)
             val idealY = (rec.holdMs.toDouble() / r).coerceIn(config.minPressMs.toDouble(), config.maxPressMs.toDouble())
             val x = rec.normalizedDistancePx.toDouble()
-            val w = if (rec.outcome == JumpOutcome.CENTER) 1.4 else 1.0
+            val w = if (rec.outcome == JumpOutcome.CENTER) 1.6 else 1.0
             sw += w
             sx += w * x
             sy += w * idealY

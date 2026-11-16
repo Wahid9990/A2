@@ -60,6 +60,8 @@ class ScreenCaptureService : Service() {
 
     private val bitmapLock = Any()
     private var cachedBitmap: Bitmap? = null
+    @Volatile
+    private var manualConfigEpoch = 0L
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -241,6 +243,7 @@ class ScreenCaptureService : Service() {
             AutomationBridge.appendLog("Ignored correction: Accessibility Service is not bound yet", isError = true)
             return
         }
+        manualConfigEpoch++
         val cfg = AutomationBridge.currentConfig.value
         val latest = AutomationBridge.trainingRecords.value.firstOrNull()
         val (updatedCfg, updatedRec, msg) = JumpTrainer.applyManualFeedback(cfg, latest, isShort)
@@ -262,8 +265,11 @@ class ScreenCaptureService : Service() {
         var (stableResult, stableDiag) = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
             ?: return 300L
 
+        val startManualEpoch = manualConfigEpoch
+
         if (requireStability && AutomationBridge.isAutoLoopActive.value) {
             var checks = 0
+            var lockedStable = false
             while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
                 delay(150L)
                 val nextPair = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
@@ -280,6 +286,7 @@ class ScreenCaptureService : Service() {
                 ) {
                     stableResult = nextResult
                     stableDiag = nextPair.second
+                    lockedStable = true
                     break
                 }
                 if (nextPair != null) {
@@ -287,6 +294,9 @@ class ScreenCaptureService : Service() {
                     stableDiag = nextPair.second
                 }
                 checks++
+            }
+            if (!lockedStable) {
+                return 220L
             }
         }
 
@@ -339,38 +349,46 @@ class ScreenCaptureService : Service() {
         // Flush any frame from during the hold so post-jump burst captures the real touchdown
         clearCachedFrame()
 
-        // Measure post-jump touchdown before full camera pan completes
-        delay(420L)
+        // Wait past airborne arc (~550ms) so burst captures true grounded touchdown before/as camera pans
+        delay(620L)
         val burst1 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = false)?.first
         val r1 = JumpTrainer.computeLandingRatio(stableResult, burst1)
 
-        delay(150L)
+        delay(140L)
         val burst2 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
         val r2 = JumpTrainer.computeLandingRatio(stableResult, burst2)
 
-        // Pick the closer-to-touchdown ratio (when r2 drifted back toward 0 during pan, r1 is touchdown;
-        // if burst1 was mid-flight or null, prefer valid r2)
         val landingRatio = when {
-            r1 != null && r2 != null -> if (abs(r1 - 1f) <= abs(r2 - 1f) || r1 > r2 + 0.08f) r1 else r2
-            r1 != null -> r1
-            else -> r2
+            r1 != null && r2 != null -> when {
+                abs(r1 - r2) <= 0.06f -> (r1 + r2) / 2f
+                r2 < r1 - 0.06f -> r1
+                else -> r2
+            }
+            r2 != null -> r2
+            else -> r1
         }
 
         // Wait remaining cooldown for camera pan / Game Over popup to finish settling
-        val remainingCooldown = (config.jumpCooldownMs - 570L).coerceAtLeast(500L)
+        val remainingCooldown = (config.jumpCooldownMs - 760L).coerceAtLeast(450L)
         delay(remainingCooldown)
         val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
 
         val outcome = JumpTrainer.classifyOutcome(stableResult, landingRatio, postSettled)
         val existingHistory = AutomationBridge.trainingRecords.value
-        val (updatedConfig, trainNote) = JumpTrainer.applyOnlineUpdate(
-            config = config,
-            dNorm = stableResult.normalizedDistancePx,
-            holdMs = holdMs,
-            outcome = outcome,
-            landingRatio = landingRatio,
-            history = existingHistory
-        )
+        val activeCfg = AutomationBridge.currentConfig.value
+        val userOverrodeMidJump = manualConfigEpoch != startManualEpoch
+        val (updatedConfig, trainNote) = if (userOverrodeMidJump) {
+            activeCfg to "Kept manual HUD fix"
+        } else {
+            JumpTrainer.applyOnlineUpdate(
+                config = activeCfg,
+                dNorm = stableResult.normalizedDistancePx,
+                holdMs = holdMs,
+                outcome = outcome,
+                landingRatio = landingRatio,
+                history = existingHistory
+            )
+        }
 
         val blk = stableResult.blockBounds!!
         val ratioSummary = landingRatio?.let { String.format(Locale.US, "r=%.2f", it) } ?: "r=NA"
@@ -390,8 +408,8 @@ class ScreenCaptureService : Service() {
             holdMs = holdMs,
             landingRatio = landingRatio,
             outcome = outcome,
-            kBefore = config.kFactor,
-            bBefore = config.offsetMs,
+            kBefore = activeCfg.kFactor,
+            bBefore = activeCfg.offsetMs,
             kAfter = updatedConfig.kFactor,
             bAfter = updatedConfig.offsetMs,
             skyTopHex = stableDiag.skyTopHex,
@@ -403,7 +421,7 @@ class ScreenCaptureService : Service() {
         AutomationBridge.prependTrainingRecord(record, banner)
         repository.saveTrainingHistory(AutomationBridge.trainingRecords.value)
 
-        if (updatedConfig != config && config.autoTrainEnabled) {
+        if (!userOverrodeMidJump && updatedConfig != activeCfg && activeCfg.autoTrainEnabled) {
             AutomationBridge.updateConfig(updatedConfig)
             repository.updateConfig { updatedConfig }
             AutomationBridge.appendLog(
@@ -412,9 +430,9 @@ class ScreenCaptureService : Service() {
                     "Self-Train [%s %s]: k %.3f→%.3f, b %.0f→%.0f (%s)",
                     outcome.shortLabel,
                     ratioSummary,
-                    config.kFactor,
+                    activeCfg.kFactor,
                     updatedConfig.kFactor,
-                    config.offsetMs,
+                    activeCfg.offsetMs,
                     updatedConfig.offsetMs,
                     trainNote
                 )

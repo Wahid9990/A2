@@ -508,6 +508,12 @@ object BlockVisionAnalyzer {
         rejectDarkShadows: Boolean
     ): BlockTrace? {
         val maxBlockScanY = (pawnBaseY - roiTop - 10).roundToInt().coerceIn(0, roiHeight - 1)
+        val maxValidBlockWidth = (width * 0.415f).roundToInt()
+        val minVerticalClimb = width * 0.14f
+
+        var bestBlock: BlockTrace? = null
+        var bestScore = Float.NEGATIVE_INFINITY
+
         var ry = 0
         while (ry <= maxBlockScanY) {
             val rowOffset = ry * width
@@ -564,27 +570,46 @@ object BlockVisionAnalyzer {
                     rejectDarkShadows = rejectDarkShadows
                 )
                 val cHeight = traced.lastTopRowY - ry
-                val centerX = (traced.widestLeftX + traced.widestRightX) / 2f
-                val centerY = roiTop + traced.widestRowY.toFloat()
-                val distFromPawn = hypot(centerX - pawnCenterX, centerY - pawnBaseY)
+                val centerX = traced.apexX * 0.35f + ((traced.widestLeftX + traced.widestRightX) * 0.5f) * 0.65f
+                val isIsometricDiamond = traced.widestRowY > traced.apexY + 6
+                val centerYRel = if (isIsometricDiamond) {
+                    val projectedEquator = traced.apexY + traced.maxTopWidth * 0.285f
+                    (traced.widestRowY * 0.5f + projectedEquator * 0.5f)
+                } else {
+                    (traced.apexY + traced.lastTopRowY) / 2f
+                }
+                val centerY = roiTop + centerYRel
+
+                val dxAbs = abs(centerX - pawnCenterX)
+                val dyAbs = pawnBaseY - centerY
+                val distFromPawn = hypot(dxAbs, dyAbs)
                 val overlapsPawnBase = pawnCenterX in (traced.widestLeftX - 10f)..(traced.widestRightX + 10f) &&
                     pawnBaseY in (roiTop + ry - 8f)..(roiTop + traced.lastTopRowY + width * 0.14f)
 
-                if (traced.maxTopWidth >= minValidBlockWidth &&
+                val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
                     cHeight >= minValidBlockHeight &&
-                    distFromPawn >= width * 0.10f &&
+                    distFromPawn >= width * 0.18f &&
                     !overlapsPawnBase &&
-                    centerY < pawnBaseY - 12f
-                ) {
-                    return traced
-                } else {
-                    ry = max(ry + 1, traced.lastTopRowY + 2)
-                    continue
+                    dyAbs >= minVerticalClimb &&
+                    dxAbs >= dyAbs * 0.25f
+
+                if (validGeometry) {
+                    // Prefer the true next block (closest diagonal platform above the pawn rather than far 2nd blocks)
+                    val isoRatio = dxAbs / dyAbs.coerceAtLeast(1f)
+                    val isoBonus = if (isoRatio in 0.35f..1.85f) 400f else 0f
+                    val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.39f).roundToInt()) 150f else 0f
+                    val score = isoBonus + sizeBonus - distFromPawn
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestBlock = traced
+                    }
                 }
+                ry = max(ry + 2, traced.lastTopRowY + 4)
+                continue
             }
             ry++
         }
-        return null
+        return bestBlock
     }
 
     private fun traceBlockDownward(
@@ -606,7 +631,10 @@ object BlockVisionAnalyzer {
         var cWidestRightX = apexX
         var cLastTopRowY = startY
         var plateauRows = 0
-        val maxTraceY = min(roiHeight - 1, startY + (width * 0.25f).roundToInt())
+        val maxTraceY = min(roiHeight - 1, startY + (width * 0.18f).roundToInt())
+        val maxWideningY = startY + (width * 0.145f).roundToInt()
+        val maxReasonableWidth = (width * 0.415f).roundToInt()
+        val maxSpikeJump = max(24, (width * 0.06f).roundToInt())
         var traceCenterX = apexX.roundToInt().coerceIn(marginX, width - marginX - 1)
 
         for (ty in startY..maxTraceY) {
@@ -644,10 +672,17 @@ object BlockVisionAnalyzer {
 
             val rowWidth = rx - lx
             if (rowWidth >= 4) {
+                // Stop if tracing downward bled sideways into an adjacent drop shadow or neighboring block
+                if (cMaxTopWidth >= minValidBlockWidth &&
+                    (rowWidth > maxReasonableWidth || rowWidth > cMaxTopWidth + maxSpikeJump)
+                ) {
+                    break
+                }
+
                 cLastTopRowY = ty
                 traceCenterX = ((lx + rx) / 2).coerceIn(marginX, width - marginX - 1)
 
-                if (rowWidth > cMaxTopWidth + 3) {
+                if (ty <= maxWideningY && rowWidth > cMaxTopWidth + 3 && rowWidth <= maxReasonableWidth) {
                     cMaxTopWidth = rowWidth
                     cWidestRowY = ty
                     cWidestLeftX = lx.toFloat()

@@ -164,4 +164,93 @@ class JumpTrainerTest {
         assertTrue(report.contains("D=385(n=577)"))
         assertTrue(report.contains("Self-Train active"))
     }
+
+    @Test
+    fun `fatal OUT_OVERSHOOT with near-1 edge ratio still lowers k and skips OLS undo`() {
+        val cfg = BotConfig(kFactor = 1.56f, offsetMs = 10f, autoTrainEnabled = true)
+        val staleHistory = (1..5).map { idx ->
+            JumpTelemetryRecord(
+                id = idx.toLong(),
+                timestamp = "12:00:0$idx",
+                pawnX = 220f,
+                pawnY = 950f,
+                pawnPixels = 2700,
+                blockX = 500f,
+                blockY = 740f,
+                blockWidth = 236f,
+                blockHeight = 80f,
+                rawDistancePx = 220f + idx * 40f,
+                normalizedDistancePx = 330f + idx * 60f,
+                holdMs = (530 + idx * 95).toLong(),
+                landingRatio = 0.90f, // biased upward
+                outcome = JumpOutcome.CENTER,
+                kBefore = 1.56f,
+                bBefore = 10f,
+                kAfter = 1.56f,
+                bAfter = 10f
+            )
+        }
+
+        val (afterOut, note) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 410f,
+            holdMs = 591L,
+            outcome = JumpOutcome.OUT_OVERSHOOT,
+            landingRatio = 1.04f,
+            history = staleHistory
+        )
+
+        assertTrue("OUT_OVERSHOOT must reduce k even if pre-fall ratio was 1.04 ($note)", afterOut.kFactor < cfg.kFactor)
+        assertTrue("OUT_OVERSHOOT must not label Dead center ($note)", !note.contains("Dead center"))
+        assertTrue("OUT_OVERSHOOT must skip stale OLS blend ($note)", !note.contains("OLS"))
+    }
+
+    @Test
+    fun `manual correction clears stale landingRatio and blocks older history from undoing fix`() {
+        val cfg = BotConfig(kFactor = 1.48f, offsetMs = 2f, autoTrainEnabled = true)
+        val misleadingRecord = JumpTelemetryRecord(
+            id = 10L,
+            timestamp = "16:21:46",
+            pawnX = 247f,
+            pawnY = 932f,
+            pawnPixels = 3763,
+            blockX = 373f,
+            blockY = 754f,
+            blockWidth = 236f,
+            blockHeight = 80f,
+            rawDistancePx = 219f,
+            normalizedDistancePx = 328f,
+            holdMs = 473L,
+            landingRatio = 1.05f,
+            outcome = JumpOutcome.CENTER,
+            kBefore = 1.48f,
+            bBefore = 2f,
+            kAfter = 1.48f,
+            bAfter = 2f
+        )
+
+        val (manualCfg, manualRec, _) = JumpTrainer.applyManualFeedback(cfg, misleadingRecord, isShort = true)
+        assertNull("Manual correction must clear stale sensor landingRatio", manualRec?.landingRatio)
+        assertTrue(manualCfg.kFactor > cfg.kFactor)
+
+        val olderLowHistory = listOf(manualRec!!) + (1..5).map { idx ->
+            misleadingRecord.copy(
+                id = idx.toLong(),
+                normalizedDistancePx = 300f + idx * 70f,
+                holdMs = (400 + idx * 80).toLong(),
+                landingRatio = 1.15f,
+                outcome = JumpOutcome.CENTER
+            )
+        }
+
+        val (afterCenter, note) = JumpTrainer.applyOnlineUpdate(
+            config = manualCfg,
+            dNorm = 500f,
+            holdMs = 740L,
+            outcome = JumpOutcome.CENTER,
+            landingRatio = 1.00f,
+            history = olderLowHistory
+        )
+        assertEquals("Older pre-manual records must not drag k back down via OLS ($note)", manualCfg.kFactor, afterCenter.kFactor, 0.001f)
+    }
 }
