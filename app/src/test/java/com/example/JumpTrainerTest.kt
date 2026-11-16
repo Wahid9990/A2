@@ -288,4 +288,100 @@ class JumpTrainerTest {
         )
         assertEquals("Pan-drifted ratio 0.57 must not spike k ($note)", cfg.kFactor, updated.kFactor, 0.001f)
     }
+
+    @Test
+    fun `learns separate biases for NARROW blocks and SIDE_BACK stance without distorting MEDIUM base`() {
+        val baseCfg = BotConfig(kFactor = 1.40f, offsetMs = 20f, autoTrainEnabled = true)
+
+        val (afterNarrowFar, note1) = JumpTrainer.applyOnlineUpdate(
+            config = baseCfg,
+            dNorm = 450f,
+            holdMs = 650L,
+            outcome = JumpOutcome.OUT_OVERSHOOT,
+            landingRatio = 1.18f,
+            history = emptyList(),
+            targetProfile = "NARROW",
+            targetColorGroup = "BLUE",
+            pawnStance = "CENTER"
+        )
+
+        val narrowAdj = JumpTrainer.computeContextAdjustmentMs(afterNarrowFar, 450f, "NARROW", "BLUE", "CENTER")
+        val mediumAdj = JumpTrainer.computeContextAdjustmentMs(afterNarrowFar, 450f, "MEDIUM", "WHITE", "CENTER")
+        assertTrue("NARROW overshoot must learn negative NARROW bias ($note1), got $narrowAdj", narrowAdj < -20L)
+        assertEquals("MEDIUM/WHITE must remain unaffected by NARROW specialty bias", 0L, mediumAdj)
+
+        val (afterSideShort, note2) = JumpTrainer.applyOnlineUpdate(
+            config = afterNarrowFar,
+            dNorm = 450f,
+            holdMs = 630L,
+            outcome = JumpOutcome.SHORT,
+            landingRatio = 0.84f,
+            history = emptyList(),
+            targetProfile = "MEDIUM",
+            targetColorGroup = "WHITE",
+            pawnStance = "SIDE_BACK"
+        )
+
+        val sideBackAdj = JumpTrainer.computeContextAdjustmentMs(afterSideShort, 450f, "MEDIUM", "WHITE", "SIDE_BACK")
+        assertTrue("SIDE_BACK short must learn positive SIDE_BACK bias ($note2), got $sideBackAdj", sideBackAdj > 12L)
+    }
+
+    @Test
+    fun `OUT_UNKNOWN near nominal anchor records MIST guard so failed hold is never repeated`() {
+        val nominalCfg = BotConfig(kFactor = 1.38f, offsetMs = 40f, autoTrainEnabled = true)
+
+        val (guardedCfg, note) = JumpTrainer.applyOnlineUpdate(
+            config = nominalCfg,
+            dNorm = 444f,
+            holdMs = 653L,
+            outcome = JumpOutcome.OUT_UNKNOWN,
+            landingRatio = null,
+            history = emptyList(),
+            targetProfile = "NARROW",
+            targetColorGroup = "BLUE",
+            pawnStance = "SIDE_FRONT"
+        )
+
+        val nextAdj = JumpTrainer.computeContextAdjustmentMs(guardedCfg, 444f, "NARROW", "BLUE", "SIDE_FRONT")
+        assertTrue("Mistake guard must shift next hold on same spot by >= 25ms ($note), got $nextAdj", kotlin.math.abs(nextAdj) >= 25L)
+
+        val report = JumpTrainer.formatTelemetryReport(
+            config = guardedCfg,
+            records = listOf(
+                JumpTelemetryRecord(
+                    id = 1L,
+                    timestamp = "09:20:00",
+                    pawnX = 359f,
+                    pawnY = 783f,
+                    pawnPixels = 2900,
+                    blockX = 259f,
+                    blockY = 504f,
+                    blockWidth = 159f,
+                    blockHeight = 80f,
+                    rawDistancePx = 296f,
+                    normalizedDistancePx = 444f,
+                    holdMs = 653L,
+                    landingRatio = null,
+                    outcome = JumpOutcome.OUT_UNKNOWN,
+                    kBefore = nominalCfg.kFactor,
+                    bBefore = nominalCfg.offsetMs,
+                    kAfter = guardedCfg.kFactor,
+                    bAfter = guardedCfg.offsetMs,
+                    pawnStance = "SIDE_FRONT",
+                    stanceOffsetFrac = 0.34f,
+                    sourceWidthPx = 220f,
+                    targetProfile = "NARROW",
+                    targetColorGroup = "BLUE",
+                    appliedBiasMs = 0L,
+                    note = note
+                )
+            ),
+            logs = emptyList(),
+            screenW = 720,
+            screenH = 1600
+        )
+        assertTrue("Report must contain AdaptiveBiases section", report.contains("AdaptiveBiases:"))
+        assertTrue("Report must log stance S=SIDE_FRONT", report.contains("S=SIDE_FRONT"))
+        assertTrue("Report must log target profile NARROW:BLUE", report.contains("NARROW:BLUE"))
+    }
 }

@@ -146,6 +146,20 @@ fun SelfTrainingCard(
                 )
             }
 
+            if (config.adaptiveBiasesMs.isNotEmpty()) {
+                val activeProfiles = config.adaptiveBiasesMs.entries
+                    .take(4)
+                    .joinToString(" · ") { (k, v) ->
+                        String.format(Locale.US, "%s %+.0fms", k.removePrefix("BLK:").removePrefix("STANCE:"), v)
+                    }
+                Text(
+                    text = "Power Memory (${config.adaptiveBiasesMs.size}): $activeProfiles",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = ElectricCyan
+                )
+            }
+
             if (records.isNotEmpty()) {
                 Column(
                     modifier = Modifier
@@ -170,13 +184,13 @@ fun SelfTrainingCard(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "#${rec.id} D=${rec.normalizedDistancePx.roundToInt()} · ${rec.holdMs}ms",
+                                text = "#${rec.id} ${rec.targetProfile.take(3)}/${rec.pawnStance.take(4)} D=${rec.normalizedDistancePx.roundToInt()}",
                                 fontFamily = JetBrainsMonoFontFamily,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = "${rec.outcome.shortLabel} (r=$ratioTxt) → k=${String.format(Locale.US, "%.2f", rec.kAfter)}",
+                                text = "${rec.outcome.shortLabel} (r=$ratioTxt) · ${rec.holdMs}ms",
                                 fontFamily = JetBrainsMonoFontFamily,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = outcomeColor,

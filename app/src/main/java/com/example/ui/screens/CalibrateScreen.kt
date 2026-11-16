@@ -263,8 +263,27 @@ private fun VisionPreviewCard(
                                     pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 8f))
                                 )
 
-                                // Pawn Marker
+                                // Source Platform & Pawn Stance Marker
                                 if (analysis.pawnFound) {
+                                    if (analysis.sourceWidthPx > 10f) {
+                                        val sLeft = analysis.sourceLeftX * sx
+                                        val sRight = analysis.sourceRightX * sx
+                                        val sCx = analysis.sourceCenterX * sx
+                                        val sCy = analysis.sourceCenterY * sy
+                                        drawLine(
+                                            color = ElectricCyan.copy(alpha = 0.7f),
+                                            start = Offset(sLeft, sCy),
+                                            end = Offset(sRight, sCy),
+                                            strokeWidth = 2.5f
+                                        )
+                                        drawCircle(
+                                            color = ElectricCyan.copy(alpha = 0.85f),
+                                            radius = 5f,
+                                            center = Offset(sCx, sCy),
+                                            style = Stroke(width = 2f)
+                                        )
+                                    }
+
                                     val px = analysis.pawnCenterX * sx
                                     val py = analysis.pawnBaseY * sy
                                     drawCircle(
@@ -389,34 +408,38 @@ private fun VisionPreviewCard(
 
 @Composable
 private fun TelemetryMetricsRow(analysis: VisionAnalysisResult) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        MetricChipCard(
-            label = "Distance D",
-            value = "${analysis.rawDistancePx.roundToInt()} px",
-            accent = ElectricCyan,
-            modifier = Modifier.weight(1f)
-        )
-        MetricChipCard(
-            label = "Block Width",
-            value = "${analysis.blockBounds?.widthPx?.roundToInt() ?: 0} px",
-            accent = KineticAmber,
-            modifier = Modifier.weight(1f)
-        )
-        MetricChipCard(
-            label = "Hold Time",
-            value = "${analysis.computedDurationMs} ms",
-            accent = ReadyEmerald,
-            modifier = Modifier.weight(1f)
-        )
-        MetricChipCard(
-            label = "Margin",
-            value = "±${analysis.safeMarginMs} ms",
-            accent = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.weight(1f)
-        )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            MetricChipCard(
+                label = "Distance D",
+                value = "${analysis.rawDistancePx.roundToInt()} px",
+                accent = ElectricCyan,
+                modifier = Modifier.weight(1f)
+            )
+            MetricChipCard(
+                label = "Block Type",
+                value = if (analysis.blockFound) {
+                    "${analysis.targetBlockProfile.take(3)} (${analysis.blockBounds?.widthPx?.roundToInt() ?: 0}px)"
+                } else "--",
+                accent = KineticAmber,
+                modifier = Modifier.weight(1.1f)
+            )
+            MetricChipCard(
+                label = "Pawn Stance",
+                value = if (analysis.pawnFound) analysis.pawnStance else "--",
+                accent = if (analysis.pawnStance == "CENTER") ReadyEmerald else KineticAmber,
+                modifier = Modifier.weight(1f)
+            )
+            MetricChipCard(
+                label = "Hold Time",
+                value = "${analysis.computedDurationMs} ms",
+                accent = ReadyEmerald,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 

@@ -311,4 +311,107 @@ class BlockVisionAnalyzerTest {
         assertTrue("Newly appeared hint should point near ($bx, $by), got $hint", hint != null && kotlin.math.abs(hint.x - bx) < 45f && kotlin.math.abs(hint.y - by) < 85f)
         assertTrue("Hinted analysis should lock cleanly onto new block", hintedRes.blockFound)
     }
+
+    @Test
+    fun `detects pawn stance on source block (CENTER vs SIDE_BACK vs SIDE_FRONT) and applies contextual bias`() {
+        val w = 720
+        val h = 1280
+        val baseCfg = BotConfig(kFactor = 1.40f, offsetMs = 20f)
+        val centerBmp = BlockVisionAnalyzer.generateSyntheticTestFrame(
+            width = w,
+            height = h,
+            pawnColorRgb = baseCfg.pawnColorRgb,
+            targetBlockWidthPx = 150f, // on 720px => normalized 225px => NARROW
+            distanceFactor = 0.68f
+        )
+        val centerRes = BlockVisionAnalyzer.analyze(centerBmp, baseCfg)
+        centerBmp.recycle()
+
+        assertTrue("Pawn should lock on center frame", centerRes.pawnFound)
+        assertTrue("Target block should lock", centerRes.blockFound)
+        assertEquals("Small 150px block on 720p must classify as NARROW", "NARROW", centerRes.targetBlockProfile)
+        assertEquals("Centered pawn should be CENTER", "CENTER", centerRes.pawnStance)
+        assertTrue("Source block width should be measured (~190px), got ${centerRes.sourceWidthPx}", centerRes.sourceWidthPx in 150f..230f)
+
+        // Draw frame with pawn shifted to the far-left edge (SIDE_BACK) of the current platform
+        val sideBmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(sideBmp)
+        val bgPaint = android.graphics.Paint().apply {
+            shader = android.graphics.LinearGradient(
+                0f, 0f, 0f, h.toFloat(),
+                intArrayOf(android.graphics.Color.rgb(94, 92, 157), android.graphics.Color.rgb(141, 148, 201)),
+                null,
+                android.graphics.Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), bgPaint)
+
+        val curCx = w * 0.28f
+        val curCy = h * 0.63f
+        val curW = 240f
+        val curH = 120f
+        val topPath = android.graphics.Path().apply {
+            moveTo(curCx, curCy - curH / 2f); lineTo(curCx + curW / 2f, curCy); lineTo(curCx, curCy + curH / 2f); lineTo(curCx - curW / 2f, curCy); close()
+        }
+        val leftWall = android.graphics.Path().apply {
+            moveTo(curCx - curW / 2f, curCy); lineTo(curCx, curCy + curH / 2f); lineTo(curCx, curCy + curH / 2f + 90f); lineTo(curCx - curW / 2f, curCy + 90f); close()
+        }
+        val rightWall = android.graphics.Path().apply {
+            moveTo(curCx + curW / 2f, curCy); lineTo(curCx, curCy + curH / 2f); lineTo(curCx, curCy + curH / 2f + 90f); lineTo(curCx + curW / 2f, curCy + 90f); close()
+        }
+        val blkPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        blkPaint.color = android.graphics.Color.rgb(30, 142, 149); canvas.drawPath(leftWall, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(22, 118, 125); canvas.drawPath(rightWall, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(250, 250, 250); canvas.drawPath(topPath, blkPaint)
+
+        // Target block up-right
+        val tCx = curCx + 320f
+        val tCy = curCy - 180f
+        val tW = 310f // normalized 465px => WIDE
+        val tH = 155f
+        val tTop = android.graphics.Path().apply {
+            moveTo(tCx, tCy - tH / 2f); lineTo(tCx + tW / 2f, tCy); lineTo(tCx, tCy + tH / 2f); lineTo(tCx - tW / 2f, tCy); close()
+        }
+        val tLeft = android.graphics.Path().apply {
+            moveTo(tCx - tW / 2f, tCy); lineTo(tCx, tCy + tH / 2f); lineTo(tCx, tCy + tH / 2f + 90f); lineTo(tCx - tW / 2f, tCy + 90f); close()
+        }
+        val tRight = android.graphics.Path().apply {
+            moveTo(tCx + tW / 2f, tCy); lineTo(tCx, tCy + tH / 2f); lineTo(tCx, tCy + tH / 2f + 90f); lineTo(tCx + tW / 2f, tCy + 90f); close()
+        }
+        blkPaint.color = android.graphics.Color.rgb(225, 162, 65); canvas.drawPath(tLeft, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(190, 128, 45); canvas.drawPath(tRight, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(255, 196, 92); canvas.drawPath(tTop, blkPaint)
+
+        // Draw pawn near BACK/LEFT side (curCx - 68px) on current block
+        val pawnX = curCx - 68f
+        val pawnY = curCy
+        val pawnPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(0x3E, 0x33, 0x53)
+        }
+        val bodyPath = android.graphics.Path().apply {
+            moveTo(pawnX - 14f, pawnY - 12f); lineTo(pawnX + 14f, pawnY - 12f)
+            lineTo(pawnX + 9f, pawnY - 52f); lineTo(pawnX - 9f, pawnY - 52f); close()
+        }
+        canvas.drawPath(bodyPath, pawnPaint)
+        canvas.drawOval(pawnX - 16f, pawnY - 18f, pawnX + 16f, pawnY - 4f, pawnPaint)
+        val collarPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.rgb(210, 175, 98) }
+        canvas.drawOval(pawnX - 12f, pawnY - 60f, pawnX + 12f, pawnY - 50f, collarPaint)
+        canvas.drawCircle(pawnX, pawnY - 72f, 12f, pawnPaint)
+
+        val biasedCfg = baseCfg.copy(
+            adaptiveBiasesMs = mapOf(
+                "BLK:WIDE" to -15f,
+                "STANCE:SIDE_BACK" to 35f
+            )
+        )
+        val sideNoBias = BlockVisionAnalyzer.analyze(sideBmp, baseCfg)
+        val sideWithBias = BlockVisionAnalyzer.analyze(sideBmp, biasedCfg)
+        sideBmp.recycle()
+
+        assertEquals("Wide block should classify as WIDE", "WIDE", sideNoBias.targetBlockProfile)
+        assertEquals("Off-center back pawn must classify as SIDE_BACK", "SIDE_BACK", sideNoBias.pawnStance)
+        assertTrue("Offset frac must be > 0.25, got ${sideNoBias.pawnStanceOffsetFrac}", sideNoBias.pawnStanceOffsetFrac > 0.25f)
+        assertEquals("Net bias (-15 + 35) = +20ms should apply", 20L, sideWithBias.appliedContextBiasMs)
+        assertEquals(sideNoBias.computedDurationMs + 20L, sideWithBias.computedDurationMs)
+    }
 }

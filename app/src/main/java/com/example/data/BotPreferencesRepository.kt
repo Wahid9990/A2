@@ -39,6 +39,7 @@ class BotPreferencesRepository(private val context: Context) {
         val MIN_PRESS_MS = longPreferencesKey("min_press_ms")
         val MAX_PRESS_MS = longPreferencesKey("max_press_ms")
         val AUTO_TRAIN_ENABLED = booleanPreferencesKey("auto_train_enabled")
+        val ADAPTIVE_BIASES_JSON = stringPreferencesKey("adaptive_biases_json")
         val TRAINING_HISTORY_JSON = stringPreferencesKey("training_history_json")
         val CALIB_VERSION = intPreferencesKey("calib_version")
     }
@@ -70,6 +71,7 @@ class BotPreferencesRepository(private val context: Context) {
         } else {
             rawCooldown
         }
+        val biases = decodeBiases(prefs[Keys.ADAPTIVE_BIASES_JSON])
         return BotConfig(
             formulaMode = mode,
             kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
@@ -85,7 +87,8 @@ class BotPreferencesRepository(private val context: Context) {
             jumpCooldownMs = migratedCooldown,
             minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
             maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs,
-            autoTrainEnabled = prefs[Keys.AUTO_TRAIN_ENABLED] ?: defaults.autoTrainEnabled
+            autoTrainEnabled = prefs[Keys.AUTO_TRAIN_ENABLED] ?: defaults.autoTrainEnabled,
+            adaptiveBiasesMs = biases
         )
     }
 
@@ -109,6 +112,7 @@ class BotPreferencesRepository(private val context: Context) {
             prefs[Keys.MIN_PRESS_MS] = updated.minPressMs
             prefs[Keys.MAX_PRESS_MS] = updated.maxPressMs
             prefs[Keys.AUTO_TRAIN_ENABLED] = updated.autoTrainEnabled
+            prefs[Keys.ADAPTIVE_BIASES_JSON] = encodeBiases(updated.adaptiveBiasesMs)
         }
     }
 
@@ -136,6 +140,31 @@ class BotPreferencesRepository(private val context: Context) {
                 prefs[Keys.TRAINING_HISTORY_JSON] = historyJson
             }
         }
+    }
+
+    private fun encodeBiases(biases: Map<String, Float>): String {
+        val obj = JSONObject()
+        biases.forEach { (key, value) ->
+            obj.put(key, value.toDouble())
+        }
+        return obj.toString()
+    }
+
+    private fun decodeBiases(raw: String?): Map<String, Float> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return runCatching {
+            val obj = JSONObject(raw)
+            val result = LinkedHashMap<String, Float>(obj.length())
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val v = obj.optDouble(key, 0.0).toFloat()
+                if (v.isFinite()) {
+                    result[key] = v
+                }
+            }
+            result
+        }.getOrDefault(emptyMap())
     }
 
     private fun encodeHistory(records: List<JumpTelemetryRecord>): String {
@@ -166,6 +195,12 @@ class BotPreferencesRepository(private val context: Context) {
                 put("bt", r.blockTopHex)
                 put("bs", r.blockSideHex)
                 put("nt", r.note)
+                put("pst", r.pawnStance)
+                put("sof", r.stanceOffsetFrac.toDouble())
+                put("sw", r.sourceWidthPx.toDouble())
+                put("tp", r.targetProfile)
+                put("tc", r.targetColorGroup)
+                put("ab", r.appliedBiasMs)
             }
             arr.put(obj)
         }
@@ -205,7 +240,13 @@ class BotPreferencesRepository(private val context: Context) {
                         pawnSampleHex = o.optString("ps", ""),
                         blockTopHex = o.optString("bt", ""),
                         blockSideHex = o.optString("bs", ""),
-                        note = o.optString("nt", "")
+                        note = o.optString("nt", ""),
+                        pawnStance = o.optString("pst", "CENTER"),
+                        stanceOffsetFrac = o.optDouble("sof", 0.0).toFloat(),
+                        sourceWidthPx = o.optDouble("sw", 0.0).toFloat(),
+                        targetProfile = o.optString("tp", "MEDIUM"),
+                        targetColorGroup = o.optString("tc", ""),
+                        appliedBiasMs = o.optLong("ab", 0L)
                     )
                 )
             }

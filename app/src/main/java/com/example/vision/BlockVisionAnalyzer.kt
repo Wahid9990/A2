@@ -13,6 +13,7 @@ import com.example.model.BotConfig
 import com.example.model.FormulaMode
 import com.example.model.PointF2D
 import com.example.model.VisionAnalysisResult
+import com.example.training.JumpTrainer
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.max
@@ -42,6 +43,16 @@ object BlockVisionAnalyzer {
         val widestLeftX: Float,
         val widestRightX: Float,
         val lastTopRowY: Int
+    )
+
+    private data class SourcePlatformStance(
+        val leftX: Float,
+        val rightX: Float,
+        val centerX: Float,
+        val centerY: Float,
+        val widthPx: Float,
+        val stance: String,
+        val offsetFrac: Float
     )
 
     data class UpperRoiSnapshot(
@@ -279,7 +290,7 @@ object BlockVisionAnalyzer {
             )
         }
 
-        // Step 3: Compute isometric geometric landing center
+        // Step 3: Compute isometric geometric landing center & structural profile
         val isIsometricDiamond = block.widestRowY > block.apexY + 6
         val midpointX = (block.widestLeftX + block.widestRightX) / 2f
         val blockCenterX = block.apexX * 0.35f + midpointX * 0.65f
@@ -296,18 +307,52 @@ object BlockVisionAnalyzer {
         val blockWidthPx = block.maxTopWidth.coerceAtLeast(minRunLength).toFloat()
         val blockHeightPx = (block.lastTopRowY - block.apexY).coerceAtLeast(1).toFloat()
 
-        // Step 4: Distance & Duration Calculation
+        val scaleTo1080 = 1080f / width.toFloat()
+        val normalizedBlockWidth = blockWidthPx * scaleTo1080
+        val targetBlockProfile = classifyBlockProfile(normalizedBlockWidth)
+        val targetColorGroup = classifyBlockTopColorGroup(
+            pixels = pixels,
+            width = width,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            centerX = blockCenterX,
+            centerY = blockCenterY,
+            topY = blockTopY
+        )
+
+        val sourceStance = detectSourcePlatformAndStance(
+            pixels = pixels,
+            width = width,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            marginX = marginX,
+            pawnCenterX = pawnCenterX,
+            pawnBaseY = pawnBaseY,
+            pawnWidthEstimate = pawnWidthEstimate,
+            targetCenterX = blockCenterX,
+            excludedRect = excludedRect,
+            thresholdSq = translucentThresholdSq
+        )
+
+        // Step 4: Distance & Contextual Duration Calculation
         val dx = blockCenterX - pawnCenterX
         val dy = blockCenterY - pawnBaseY
         val rawDistancePx = hypot(dx, dy)
-        val scaleTo1080 = 1080f / width.toFloat()
         val normalizedDistancePx = rawDistancePx * scaleTo1080
 
-        val durationMs = computeDurationMs(normalizedDistancePx, config)
-        val normalizedBlockWidth = blockWidthPx * scaleTo1080
+        val baseDurationMs = computeDurationMs(normalizedDistancePx, config)
+        val contextBiasMs = JumpTrainer.computeContextAdjustmentMs(
+            config = config,
+            normalizedDistancePx = normalizedDistancePx,
+            targetBlockProfile = targetBlockProfile,
+            targetColorGroup = targetColorGroup,
+            pawnStance = sourceStance.stance
+        )
+        val durationMs = (baseDurationMs + contextBiasMs).coerceIn(config.minPressMs, config.maxPressMs)
         val safeMarginMs = (config.kFactor * (normalizedBlockWidth * 0.35f)).roundToLong().coerceAtLeast(5L)
 
         val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+        val biasTag = if (contextBiasMs != 0L) " (${if (contextBiasMs > 0) "+" else ""}${contextBiasMs}ms)" else ""
         return VisionAnalysisResult(
             imageWidth = width,
             imageHeight = height,
@@ -333,7 +378,17 @@ object BlockVisionAnalyzer {
             computedDurationMs = durationMs,
             safeMarginMs = safeMarginMs,
             analysisTimeMs = elapsedMs,
-            statusMessage = "Locked target: D=${rawDistancePx.roundToInt()}px · W=${blockWidthPx.roundToInt()}px → Hold ${durationMs}ms"
+            statusMessage = "Locked $targetBlockProfile($targetColorGroup) · Stance=${sourceStance.stance} · D=${rawDistancePx.roundToInt()}px → Hold ${durationMs}ms$biasTag",
+            sourceLeftX = sourceStance.leftX,
+            sourceRightX = sourceStance.rightX,
+            sourceCenterX = sourceStance.centerX,
+            sourceCenterY = sourceStance.centerY,
+            sourceWidthPx = sourceStance.widthPx,
+            pawnStance = sourceStance.stance,
+            pawnStanceOffsetFrac = sourceStance.offsetFrac,
+            targetBlockProfile = targetBlockProfile,
+            targetColorGroup = targetColorGroup,
+            appliedContextBiasMs = contextBiasMs
         )
     }
 
@@ -1066,6 +1121,216 @@ object BlockVisionAnalyzer {
                     config.offsetMs
         }
         return raw.roundToLong().coerceIn(config.minPressMs, config.maxPressMs)
+    }
+
+    private fun classifyBlockProfile(normalizedBlockWidth: Float): String {
+        return when {
+            normalizedBlockWidth < 330f -> "NARROW"
+            normalizedBlockWidth <= 435f -> "MEDIUM"
+            else -> "WIDE"
+        }
+    }
+
+    private fun classifyBlockTopColorGroup(
+        pixels: IntArray,
+        width: Int,
+        roiTop: Int,
+        roiHeight: Int,
+        centerX: Float,
+        centerY: Float,
+        topY: Float
+    ): String {
+        val sampleY = (((topY + centerY) * 0.5f) - roiTop).roundToInt().coerceIn(0, roiHeight - 1)
+        val cx = centerX.roundToInt().coerceIn(8, width - 9)
+        val offsets = intArrayOf(-10, 0, 10)
+        var sumR = 0
+        var sumG = 0
+        var sumB = 0
+        for (dx in offsets) {
+            val px = pixels[sampleY * width + (cx + dx).coerceIn(0, width - 1)]
+            sumR += (px shr 16) and 0xFF
+            sumG += (px shr 8) and 0xFF
+            sumB += px and 0xFF
+        }
+        val r = sumR / offsets.size
+        val g = sumG / offsets.size
+        val b = sumB / offsets.size
+        val maxC = maxOf(r, g, b)
+        val minC = minOf(r, g, b)
+        val sat = maxC - minC
+
+        return when {
+            maxC < 95 -> "DARK"
+            sat < 34 -> if (maxC > 205) "WHITE" else "SLATE"
+            r >= g && r >= b -> when {
+                g > 155 && b < 135 -> "GOLD"
+                b > 130 -> "PINK"
+                else -> "CORAL"
+            }
+            g >= r && g >= b -> when {
+                b > r + 18 -> "CYAN"
+                r > b + 35 -> "LIME"
+                else -> "MINT"
+            }
+            else -> when {
+                r > 150 && r > g - 15 -> "PURPLE"
+                g > 165 -> "CYAN"
+                else -> "BLUE"
+            }
+        }
+    }
+
+    private fun detectSourcePlatformAndStance(
+        pixels: IntArray,
+        width: Int,
+        roiTop: Int,
+        roiHeight: Int,
+        marginX: Int,
+        pawnCenterX: Float,
+        pawnBaseY: Float,
+        pawnWidthEstimate: Int,
+        targetCenterX: Float,
+        excludedRect: Rect?,
+        thresholdSq: Int
+    ): SourcePlatformStance {
+        val scanStartRel = (pawnBaseY - roiTop - width * 0.08f).roundToInt().coerceIn(0, roiHeight - 1)
+        val scanEndRel = (pawnBaseY - roiTop + width * 0.12f).roundToInt().coerceIn(scanStartRel, roiHeight - 1)
+        val minSrcW = (width * 0.14f).roundToInt()
+        val maxSrcW = (width * 0.46f).roundToInt()
+        val maxHalfTravel = (width * 0.34f).roundToInt()
+        val bridgeHalf = max(16, (pawnWidthEstimate * 0.72f).roundToInt())
+
+        var bestWidth = 0
+        var bestLeftX = pawnCenterX
+        var bestRightX = pawnCenterX
+        var bestWidestRelY = (pawnBaseY - roiTop).roundToInt()
+        var topSurfaceRelY = Int.MAX_VALUE
+        var seedX = pawnCenterX.roundToInt().coerceIn(marginX, width - marginX - 1)
+
+        var ry = scanStartRel
+        while (ry <= scanEndRel) {
+            val absY = roiTop + ry
+            val rowOff = ry * width
+            val leftBg = pixels[rowOff + marginX / 2]
+            val rightBg = pixels[rowOff + width - 1 - marginX / 2]
+            val pawnInRowBand = absY <= (pawnBaseY + 10f).roundToInt()
+
+            var anchorX = seedX
+            if (!pawnInRowBand || abs(anchorX - pawnCenterX) > bridgeHalf) {
+                var foundAnchor = -1
+                for (d in 0..20 step 2) {
+                    val xR = (seedX + d).coerceAtMost(width - marginX - 1)
+                    if (!isExcluded(xR, absY, excludedRect) &&
+                        isValidBlockPixel(pixels[rowOff + xR], leftBg, rightBg, xR, width, thresholdSq, rejectDarkShadows = true)
+                    ) {
+                        foundAnchor = xR
+                        break
+                    }
+                    val xL = (seedX - d).coerceAtLeast(marginX)
+                    if (!isExcluded(xL, absY, excludedRect) &&
+                        isValidBlockPixel(pixels[rowOff + xL], leftBg, rightBg, xL, width, thresholdSq, rejectDarkShadows = true)
+                    ) {
+                        foundAnchor = xL
+                        break
+                    }
+                }
+                if (foundAnchor < 0) {
+                    ry += 2
+                    continue
+                }
+                anchorX = foundAnchor
+            }
+
+            var lx = anchorX
+            var missLeft = 0
+            val minScanX = max(marginX, anchorX - maxHalfTravel)
+            while (lx > minScanX) {
+                val nx = lx - 1
+                if (isExcluded(nx, absY, excludedRect)) break
+                val inBridge = pawnInRowBand && abs(nx - pawnCenterX) <= bridgeHalf
+                val fg = inBridge || isValidBlockPixel(pixels[rowOff + nx], leftBg, rightBg, nx, width, thresholdSq, rejectDarkShadows = true)
+                if (fg) {
+                    lx = nx
+                    missLeft = 0
+                } else {
+                    missLeft++
+                    if (missLeft >= 2) break
+                    lx = nx
+                }
+            }
+
+            var rx = anchorX
+            var missRight = 0
+            val maxScanX = min(width - marginX - 1, anchorX + maxHalfTravel)
+            while (rx < maxScanX) {
+                val nx = rx + 1
+                if (isExcluded(nx, absY, excludedRect)) break
+                val inBridge = pawnInRowBand && abs(nx - pawnCenterX) <= bridgeHalf
+                val fg = inBridge || isValidBlockPixel(pixels[rowOff + nx], leftBg, rightBg, nx, width, thresholdSq, rejectDarkShadows = true)
+                if (fg) {
+                    rx = nx
+                    missRight = 0
+                } else {
+                    missRight++
+                    if (missRight >= 2) break
+                    rx = nx
+                }
+            }
+
+            val rowW = rx - lx
+            if (rowW >= 18 && abs((lx + rx) * 0.5f - pawnCenterX) <= max(rowW * 0.62f, bridgeHalf * 1.4f)) {
+                if (ry < topSurfaceRelY) {
+                    topSurfaceRelY = ry
+                }
+                // Stop widening if it suddenly bleeds into an unrelated background object (> 8% screen jump)
+                val spikeLimit = if (bestWidth >= minSrcW) bestWidth + (width * 0.08f).roundToInt() else maxSrcW
+                if (rowW in minSrcW..min(maxSrcW, spikeLimit) && rowW > bestWidth + 3) {
+                    bestWidth = rowW
+                    bestLeftX = lx.toFloat()
+                    bestRightX = rx.toFloat()
+                    bestWidestRelY = ry
+                    seedX = ((lx + rx) / 2).coerceIn(marginX, width - marginX - 1)
+                }
+            }
+            ry += 2
+        }
+
+        if (bestWidth < minSrcW) {
+            return SourcePlatformStance(0f, 0f, 0f, 0f, 0f, "UNKNOWN", 0f)
+        }
+
+        val srcCenterX = (bestLeftX + bestRightX) * 0.5f
+        val projectedCenterYRel = if (topSurfaceRelY < bestWidestRelY - 6) {
+            (bestWidestRelY * 0.65f) + ((topSurfaceRelY + bestWidth * 0.255f) * 0.35f)
+        } else {
+            bestWidestRelY.toFloat()
+        }
+        val srcCenterY = roiTop + projectedCenterYRel
+
+        val halfW = (bestWidth * 0.5f).coerceAtLeast(30f)
+        val halfH = (bestWidth * 0.26f).coerceAtLeast(16f)
+        val normDx = (pawnCenterX - srcCenterX) / halfW
+        val normDy = (pawnBaseY - srcCenterY) / halfH
+        val radialOffset = hypot(normDx, normDy).coerceIn(0f, 1.4f)
+        val jumpDirX = if (targetCenterX >= pawnCenterX) 1f else -1f
+        val signedAlongJump = normDx * jumpDirX
+
+        val stance = when {
+            radialOffset <= 0.25f -> "CENTER"
+            signedAlongJump >= 0.24f -> "SIDE_FRONT"
+            signedAlongJump <= -0.24f -> "SIDE_BACK"
+            else -> "SIDE_EDGE"
+        }
+
+        return SourcePlatformStance(
+            leftX = bestLeftX,
+            rightX = bestRightX,
+            centerX = srcCenterX,
+            centerY = srcCenterY,
+            widthPx = bestWidth.toFloat(),
+            stance = stance,
+            offsetFrac = radialOffset
+        )
     }
 
     private fun isExcluded(x: Int, absY: Int, excludedRect: Rect?): Boolean {

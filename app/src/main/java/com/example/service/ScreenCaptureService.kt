@@ -362,16 +362,19 @@ class ScreenCaptureService : Service() {
         val baseTapY = screenHeight * config.tapYFraction
         val holdMs = stableResult.computedDurationMs
 
+        val biasNote = if (stableResult.appliedContextBiasMs != 0L) String.format(Locale.US, "%+d", stableResult.appliedContextBiasMs) else "0"
         AutomationBridge.appendLog(
             String.format(
                 Locale.US,
-                "D=%.0fpx (n=%.0f) W=%.0fpx → Hold %dms (k=%.2f b=%.0f)",
+                "D=%.0fpx (n=%.0f) %s:%s [%s] → Hold %dms (bias=%sms, k=%.2f)",
                 stableResult.rawDistancePx,
                 stableResult.normalizedDistancePx,
-                stableResult.blockBounds?.widthPx ?: 0f,
+                stableResult.targetBlockProfile,
+                stableResult.targetColorGroup.ifBlank { "STD" },
+                stableResult.pawnStance,
                 holdMs,
-                config.kFactor,
-                config.offsetMs
+                biasNote,
+                config.kFactor
             )
         )
 
@@ -440,13 +443,16 @@ class ScreenCaptureService : Service() {
                 holdMs = holdMs,
                 outcome = outcome,
                 landingRatio = landingRatio,
-                history = existingHistory
+                history = existingHistory,
+                targetProfile = stableResult.targetBlockProfile,
+                targetColorGroup = stableResult.targetColorGroup,
+                pawnStance = stableResult.pawnStance
             )
         }
 
         val blk = stableResult.blockBounds!!
         val ratioSummary = landingRatio?.let { String.format(Locale.US, "r=%.2f", it) } ?: "r=NA"
-        val banner = "${outcome.shortLabel} ($ratioSummary) · k=${String.format(Locale.US, "%.2f", updatedConfig.kFactor)}"
+        val banner = "${outcome.shortLabel} ($ratioSummary) · ${stableResult.targetBlockProfile.take(3)}/${stableResult.pawnStance.take(4)}"
         val record = JumpTelemetryRecord(
             id = AutomationBridge.nextRecordId(),
             timestamp = AutomationBridge.currentTimeStr(),
@@ -471,7 +477,13 @@ class ScreenCaptureService : Service() {
             pawnSampleHex = stableDiag.pawnSampleHex,
             blockTopHex = stableDiag.blockTopHex,
             blockSideHex = stableDiag.blockSideHex,
-            note = trainNote
+            note = trainNote,
+            pawnStance = stableResult.pawnStance,
+            stanceOffsetFrac = stableResult.pawnStanceOffsetFrac,
+            sourceWidthPx = stableResult.sourceWidthPx,
+            targetProfile = stableResult.targetBlockProfile,
+            targetColorGroup = stableResult.targetColorGroup,
+            appliedBiasMs = stableResult.appliedContextBiasMs
         )
 
         AutomationBridge.prependTrainingRecord(record, banner)

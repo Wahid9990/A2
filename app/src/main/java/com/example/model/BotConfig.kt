@@ -20,7 +20,8 @@ data class BotConfig(
     val jumpCooldownMs: Long = 1150L,
     val minPressMs: Long = 90L,
     val maxPressMs: Long = 1600L,
-    val autoTrainEnabled: Boolean = true
+    val autoTrainEnabled: Boolean = true,
+    val adaptiveBiasesMs: Map<String, Float> = emptyMap()
 )
 
 enum class JumpOutcome(val shortLabel: String) {
@@ -59,7 +60,13 @@ data class JumpTelemetryRecord(
     val pawnSampleHex: String = "",
     val blockTopHex: String = "",
     val blockSideHex: String = "",
-    val note: String = ""
+    val note: String = "",
+    val pawnStance: String = "CENTER",
+    val stanceOffsetFrac: Float = 0f,
+    val sourceWidthPx: Float = 0f,
+    val targetProfile: String = "MEDIUM",
+    val targetColorGroup: String = "",
+    val appliedBiasMs: Long = 0L
 )
 
 data class PointF2D(
@@ -94,7 +101,17 @@ data class VisionAnalysisResult(
     val computedDurationMs: Long,
     val safeMarginMs: Long,
     val analysisTimeMs: Long,
-    val statusMessage: String
+    val statusMessage: String,
+    val sourceLeftX: Float = 0f,
+    val sourceRightX: Float = 0f,
+    val sourceCenterX: Float = 0f,
+    val sourceCenterY: Float = 0f,
+    val sourceWidthPx: Float = 0f,
+    val pawnStance: String = "CENTER",
+    val pawnStanceOffsetFrac: Float = 0f,
+    val targetBlockProfile: String = "MEDIUM",
+    val targetColorGroup: String = "",
+    val appliedContextBiasMs: Long = 0L
 )
 
 data class BotLogEntry(

@@ -415,10 +415,20 @@ class FloatingOverlayService : Service() {
             AutomationBridge.lastAnalysis.collect { analysis ->
                 if (analysis != null) {
                     val d = analysis.rawDistancePx.roundToInt()
-                    val w = analysis.blockBounds?.widthPx?.roundToInt() ?: 0
                     val t = analysis.computedDurationMs
+                    val prof = analysis.targetBlockProfile.take(3)
+                    val st = when (analysis.pawnStance) {
+                        "SIDE_FRONT" -> "S+"
+                        "SIDE_BACK" -> "S-"
+                        "SIDE_EDGE" -> "SE"
+                        "CENTER" -> "C"
+                        else -> "?"
+                    }
+                    val bTag = if (analysis.appliedContextBiasMs != 0L) {
+                        String.format(Locale.US, "%+d", analysis.appliedContextBiasMs)
+                    } else ""
                     telemetryText.text = if (analysis.blockFound) {
-                        "D: ${d}px  W: ${w}px  →  ${t}ms"
+                        "D:${d} [$prof|$st] → ${t}ms$bTag"
                     } else {
                         analysis.statusMessage.take(32)
                     }
