@@ -116,4 +116,72 @@ class BlockVisionAnalyzerTest {
             result.pawnBaseY in 780f..820f
         )
     }
+
+    @Test
+    fun `detects low-contrast background-matching lavender block on purple sky`() {
+        val config = BotConfig(bgDiffThreshold = 38)
+        val bmp = BlockVisionAnalyzer.generateSyntheticTestFrame(
+            width = 720,
+            height = 1280,
+            pawnColorRgb = config.pawnColorRgb,
+            targetBlockWidthPx = 210f,
+            distanceFactor = 0.68f
+        )
+        // Paint over the bright yellow block with a subtle slate-purple block very close to the sky gradient (~#7A7DB2)
+        val painted = bmp.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+        bmp.recycle()
+        val canvas = android.graphics.Canvas(painted)
+
+        // Wipe the synthetic sky behind the target region cleanly first
+        val bgPaint = android.graphics.Paint().apply {
+            shader = android.graphics.LinearGradient(
+                0f, 0f, 0f, 1280f,
+                intArrayOf(android.graphics.Color.rgb(94, 92, 157), android.graphics.Color.rgb(141, 148, 201)),
+                null,
+                android.graphics.Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(300f, 450f, 710f, 750f, bgPaint)
+
+        val curCx = 720f * 0.28f
+        val curCy = 1280f * 0.63f
+        val cx = curCx + 720f * 0.48f * 0.68f
+        val cy = curCy - 1280f * 0.22f * 0.68f
+        val hw = 105f
+        val hh = 54f
+        val depth = 82f
+
+        val topPath = android.graphics.Path().apply {
+            moveTo(cx, cy - hh); lineTo(cx + hw, cy); lineTo(cx, cy + hh); lineTo(cx - hw, cy); close()
+        }
+        val leftPath = android.graphics.Path().apply {
+            moveTo(cx - hw, cy); lineTo(cx, cy + hh); lineTo(cx, cy + hh + depth); lineTo(cx - hw, cy + depth); close()
+        }
+        val rightPath = android.graphics.Path().apply {
+            moveTo(cx + hw, cy); lineTo(cx, cy + hh); lineTo(cx, cy + hh + depth); lineTo(cx + hw, cy + depth); close()
+        }
+        val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        // Only ~12-18 RGB units away from the purple sky behind it!
+        p.color = android.graphics.Color.rgb(138, 144, 198); canvas.drawPath(topPath, p)
+        p.color = android.graphics.Color.rgb(112, 118, 178); canvas.drawPath(leftPath, p)
+        p.color = android.graphics.Color.rgb(96, 102, 165); canvas.drawPath(rightPath, p)
+
+        val result = BlockVisionAnalyzer.analyze(painted, config)
+        val diag = BlockVisionAnalyzer.sampleFrameDiagnostics(
+            bitmap = painted,
+            roiTopY = result.roiTopY,
+            roiBottomY = result.roiBottomY,
+            pawnX = result.pawnCenterX,
+            pawnY = result.pawnBaseY,
+            blockX = result.blockBounds?.center?.x ?: 0f,
+            blockY = result.blockBounds?.center?.y ?: 0f,
+            blockBottomY = result.blockBounds?.bottomY ?: 0f
+        )
+        painted.recycle()
+
+        assertTrue("Pawn should still lock", result.pawnFound)
+        assertTrue("Low-contrast background-matching block should be detected: ${result.statusMessage}", result.blockFound)
+        assertTrue("Measured block width should be >= 160px, got ${result.blockBounds?.widthPx}", (result.blockBounds?.widthPx ?: 0f) >= 160f)
+        assertTrue("Block top color telemetry should be sampled", diag.blockTopHex.startsWith("#"))
+    }
 }

@@ -415,6 +415,8 @@ class ScreenCaptureService : Service() {
             skyTopHex = stableDiag.skyTopHex,
             skyMidHex = stableDiag.skyMidHex,
             pawnSampleHex = stableDiag.pawnSampleHex,
+            blockTopHex = stableDiag.blockTopHex,
+            blockSideHex = stableDiag.blockSideHex,
             note = trainNote
         )
 
@@ -463,7 +465,10 @@ class ScreenCaptureService : Service() {
                 roiTopY = res.roiTopY,
                 roiBottomY = res.roiBottomY,
                 pawnX = res.pawnCenterX,
-                pawnY = res.pawnBaseY
+                pawnY = res.pawnBaseY,
+                blockX = res.blockBounds?.center?.x ?: 0f,
+                blockY = res.blockBounds?.center?.y ?: 0f,
+                blockBottomY = res.blockBounds?.bottomY ?: 0f
             )
             res to diag
         } finally {

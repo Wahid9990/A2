@@ -354,10 +354,11 @@ object JumpTrainer {
             sb.appendLine("--- Jump History (newest first, up to 35) ---")
             records.take(35).forEach { r ->
                 val ratioStr = r.landingRatio?.let { String.format(Locale.US, "%.2f", it) } ?: "NA"
+                val blkTag = if (r.blockTopHex.isNotEmpty()) " blk=[${r.blockTopHex},${r.blockSideHex}]" else ""
                 sb.appendLine(
                     String.format(
                         Locale.US,
-                        "#%d %s %s D=%.0f(n=%.0f) hold=%dms r=%s P=(%.0f,%.0f,%dpx) B=(%.0f,%.0f,w=%.0f) k=%.3f->%.3f b=%.0f->%.0f rgb=[%s,%s,%s] %s",
+                        "#%d %s %s D=%.0f(n=%.0f) hold=%dms r=%s P=(%.0f,%.0f,%dpx) B=(%.0f,%.0f,w=%.0f) k=%.3f->%.3f b=%.0f->%.0f rgb=[%s,%s,%s]%s %s",
                         r.id,
                         r.timestamp,
                         r.outcome.shortLabel,
@@ -378,6 +379,7 @@ object JumpTrainer {
                         r.skyTopHex,
                         r.skyMidHex,
                         r.pawnSampleHex,
+                        blkTag,
                         r.note
                     )
                 )

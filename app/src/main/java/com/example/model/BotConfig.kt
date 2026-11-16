@@ -57,6 +57,8 @@ data class JumpTelemetryRecord(
     val skyTopHex: String = "",
     val skyMidHex: String = "",
     val pawnSampleHex: String = "",
+    val blockTopHex: String = "",
+    val blockSideHex: String = "",
     val note: String = ""
 )
 

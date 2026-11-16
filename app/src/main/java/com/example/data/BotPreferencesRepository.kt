@@ -156,6 +156,8 @@ class BotPreferencesRepository(private val context: Context) {
                 put("st", r.skyTopHex)
                 put("sm", r.skyMidHex)
                 put("ps", r.pawnSampleHex)
+                put("bt", r.blockTopHex)
+                put("bs", r.blockSideHex)
                 put("nt", r.note)
             }
             arr.put(obj)
@@ -194,6 +196,8 @@ class BotPreferencesRepository(private val context: Context) {
                         skyTopHex = o.optString("st", ""),
                         skyMidHex = o.optString("sm", ""),
                         pawnSampleHex = o.optString("ps", ""),
+                        blockTopHex = o.optString("bt", ""),
+                        blockSideHex = o.optString("bs", ""),
                         note = o.optString("nt", "")
                     )
                 )

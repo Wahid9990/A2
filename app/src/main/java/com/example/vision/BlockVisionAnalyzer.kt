@@ -153,12 +153,14 @@ object BlockVisionAnalyzer {
         val pawnWidthEstimate = (p90X - p10X).coerceAtLeast((width * 0.045f).roundToInt())
         val pawnExclusionRadius = max((pawnWidthEstimate * 1.35f).roundToInt(), (width * 0.08f).roundToInt())
 
-        // Step 2: Two-pass target block detection (opaque blocks + half-transparent/glass blocks)
+        // Step 2: Three-pass target block detection (opaque, translucent/glass, and subtle background-matching blocks)
         val minRunLength = max(6, (width * 0.014f).roundToInt())
         val minValidBlockWidth = max(72, (width * 0.150f).roundToInt())
         val minValidBlockHeight = max(24, (height * 0.020f).roundToInt())
-        val translucentThreshold = max(12, config.bgDiffThreshold / 2)
+        val translucentThreshold = max(12, (config.bgDiffThreshold * 0.36f).roundToInt())
         val translucentThresholdSq = translucentThreshold * translucentThreshold * 3
+        val subtleThreshold = max(8, (config.bgDiffThreshold * 0.24f).roundToInt())
+        val subtleThresholdSq = subtleThreshold * subtleThreshold * 3
 
         var block = scanForTargetBlock(
             pixels = pixels,
@@ -180,7 +182,7 @@ object BlockVisionAnalyzer {
         )
 
         if (block != null) {
-            // Check upward for a semi-transparent top half above a colored lower half
+            // Check upward for a semi-transparent / subtle top half above a colored lower half
             block = extendTranslucentTopApex(
                 pixels = pixels,
                 width = width,
@@ -192,7 +194,7 @@ object BlockVisionAnalyzer {
                 translucentThresholdSq = translucentThresholdSq
             )
         } else {
-            // Pass 2: Full translucent / glass block fallback (rejecting dark drop shadows)
+            // Pass 2: Translucent / chromatic low-contrast block fallback (rejecting neutral drop shadows)
             block = scanForTargetBlock(
                 pixels = pixels,
                 width = width,
@@ -210,6 +212,29 @@ object BlockVisionAnalyzer {
                 minValidBlockWidth = minValidBlockWidth,
                 minValidBlockHeight = minValidBlockHeight,
                 rejectDarkShadows = true
+            )
+        }
+
+        if (block == null) {
+            // Pass 3: Background-matching subtle cube fallback (verifies internal 3D shading contrast)
+            block = scanForTargetBlock(
+                pixels = pixels,
+                width = width,
+                roiTop = roiTop,
+                roiHeight = roiHeight,
+                marginX = marginX,
+                step = step,
+                pawnCenterX = pawnCenterX,
+                pawnTopY = pawnTopY,
+                pawnBaseY = pawnBaseY,
+                pawnExclusionRadius = pawnExclusionRadius,
+                excludedRect = excludedRect,
+                thresholdSq = subtleThresholdSq,
+                minRunLength = minRunLength,
+                minValidBlockWidth = minValidBlockWidth,
+                minValidBlockHeight = max(minValidBlockHeight, (height * 0.028f).roundToInt()),
+                rejectDarkShadows = true,
+                requireInternalContrast = true
             )
         }
 
@@ -296,7 +321,9 @@ object BlockVisionAnalyzer {
     data class FrameDiagnostics(
         val skyTopHex: String,
         val skyMidHex: String,
-        val pawnSampleHex: String
+        val pawnSampleHex: String,
+        val blockTopHex: String = "",
+        val blockSideHex: String = ""
     )
 
     fun sampleFrameDiagnostics(
@@ -304,7 +331,10 @@ object BlockVisionAnalyzer {
         roiTopY: Float,
         roiBottomY: Float,
         pawnX: Float,
-        pawnY: Float
+        pawnY: Float,
+        blockX: Float = 0f,
+        blockY: Float = 0f,
+        blockBottomY: Float = 0f
     ): FrameDiagnostics {
         val w = bitmap.width
         val h = bitmap.height
@@ -316,10 +346,14 @@ object BlockVisionAnalyzer {
         val topY = roiTopY.roundToInt().coerceIn(0, h - 1)
         val midY = ((roiTopY + roiBottomY) * 0.5f).roundToInt().coerceIn(0, h - 1)
         val samplePawnY = (pawnY - w * 0.045f).roundToInt().coerceIn(0, h - 1)
+        val hasBlock = blockX > 1f && blockY > 1f
+        val sideY = if (blockBottomY > blockY + 4f) blockBottomY.roundToInt() else (blockY + w * 0.055f).roundToInt()
         return FrameDiagnostics(
             skyTopHex = hexAt((w * 0.04f).roundToInt(), topY),
             skyMidHex = hexAt((w * 0.96f).roundToInt(), midY),
-            pawnSampleHex = if (pawnX > 1f) hexAt(pawnX.roundToInt(), samplePawnY) else "#000000"
+            pawnSampleHex = if (pawnX > 1f) hexAt(pawnX.roundToInt(), samplePawnY) else "#000000",
+            blockTopHex = if (hasBlock) hexAt(blockX.roundToInt(), blockY.roundToInt()) else "",
+            blockSideHex = if (hasBlock) hexAt((blockX - w * 0.04f).roundToInt(), sideY) else ""
         )
     }
 
@@ -506,7 +540,8 @@ object BlockVisionAnalyzer {
         minRunLength: Int,
         minValidBlockWidth: Int,
         minValidBlockHeight: Int,
-        rejectDarkShadows: Boolean
+        rejectDarkShadows: Boolean,
+        requireInternalContrast: Boolean = false
     ): BlockTrace? {
         val maxBlockScanY = (pawnBaseY - roiTop - 10).roundToInt().coerceIn(0, roiHeight - 1)
         val maxValidBlockWidth = (width * 0.415f).roundToInt()
@@ -587,12 +622,20 @@ object BlockVisionAnalyzer {
                 val overlapsPawnBase = pawnCenterX in (traced.widestLeftX - 10f)..(traced.widestRightX + 10f) &&
                     pawnBaseY in (roiTop + ry - 8f)..(roiTop + traced.lastTopRowY + width * 0.14f)
 
+                val contrastOk = !requireInternalContrast || hasInternalBlockContrast(
+                    pixels = pixels,
+                    width = width,
+                    roiHeight = roiHeight,
+                    traced = traced
+                )
+
                 val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
                     cHeight >= minValidBlockHeight &&
                     distFromPawn >= width * 0.18f &&
                     !overlapsPawnBase &&
                     dyAbs >= minVerticalClimb &&
-                    dxAbs >= dyAbs * 0.25f
+                    dxAbs >= dyAbs * 0.25f &&
+                    contrastOk
 
                 if (validGeometry) {
                     // Prefer the true next block (closest diagonal platform above the pawn rather than far 2nd blocks)
@@ -611,6 +654,33 @@ object BlockVisionAnalyzer {
             ry++
         }
         return bestBlock
+    }
+
+    private fun hasInternalBlockContrast(
+        pixels: IntArray,
+        width: Int,
+        roiHeight: Int,
+        traced: BlockTrace
+    ): Boolean {
+        val cx = ((traced.widestLeftX + traced.widestRightX) * 0.5f).roundToInt().coerceIn(8, width - 9)
+        val topSampleY = ((traced.apexY + traced.widestRowY) * 0.5f).roundToInt().coerceIn(0, roiHeight - 1)
+        val sideSampleY = min(roiHeight - 1, traced.widestRowY + max(8, (traced.lastTopRowY - traced.apexY) / 3))
+        val topPx = pixels[topSampleY * width + cx]
+        val leftSidePx = pixels[sideSampleY * width + (cx - 12).coerceAtLeast(0)]
+        val rightSidePx = pixels[sideSampleY * width + (cx + 12).coerceAtMost(width - 1)]
+
+        fun colorDistSq(a: Int, b: Int): Int {
+            val dr = ((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)
+            val dg = ((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)
+            val db = (a and 0xFF) - (b and 0xFF)
+            return dr * dr + dg * dg + db * db
+        }
+        // Real 3D blocks have top vs side or left-wall vs right-wall shading contrast, unlike flat sky noise
+        return maxOf(
+            colorDistSq(topPx, leftSidePx),
+            colorDistSq(topPx, rightSidePx),
+            colorDistSq(leftSidePx, rightSidePx)
+        ) >= 180
     }
 
     private fun traceBlockDownward(
@@ -785,7 +855,7 @@ object BlockVisionAnalyzer {
             thresholdSq = translucentThresholdSq,
             rejectDarkShadows = true
         ).let { extended ->
-            if (extended.maxTopWidth >= baseBlock.maxTopWidth * 0.75f) extended else baseBlock
+            if (extended.maxTopWidth >= baseBlock.maxTopWidth * 0.92f) extended else baseBlock
         }
     }
 
@@ -824,15 +894,18 @@ object BlockVisionAnalyzer {
         val g = (pixel shr 8) and 0xFF
         val b = pixel and 0xFF
 
-        if (rejectDarkShadows) {
-            val pxLum = r * 3 + g * 6 + b
-            val bgLum = bgR * 3 + bgG * 6 + bgB
-            if (pxLum < bgLum - 40) return false
-        }
-
         val dr = r - bgR
         val dg = g - bgG
         val db = b - bgB
+
+        if (rejectDarkShadows) {
+            val pxLum = r * 3 + g * 6 + b
+            val bgLum = bgR * 3 + bgG * 6 + bgB
+            val maxChromaShift = maxOf(abs(dr - dg), abs(dg - db), abs(dr - db))
+            // Reject neutral/desaturated dark drop shadows on the sky, while keeping colored dark/slate blocks
+            if (pxLum < bgLum - 40 && maxChromaShift < 14) return false
+        }
+
         return (dr * dr + dg * dg + db * db) > thresholdSq
     }
 
