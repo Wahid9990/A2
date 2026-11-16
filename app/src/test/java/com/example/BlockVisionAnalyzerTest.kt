@@ -42,6 +42,26 @@ class BlockVisionAnalyzerTest {
     }
 
     @Test
+    fun `detects half-transparent top block with colored base`() {
+        val config = BotConfig()
+        val bitmap = BlockVisionAnalyzer.generateSyntheticTestFrame(
+            width = 720,
+            height = 1280,
+            pawnColorRgb = config.pawnColorRgb,
+            targetBlockWidthPx = 180f,
+            distanceFactor = 0.72f,
+            halfTransparentTarget = true
+        )
+
+        val result = BlockVisionAnalyzer.analyze(bitmap, config)
+        println("HALF TRANSPARENT => $result")
+        assertTrue("Pawn should be detected", result.pawnFound)
+        assertTrue("Half-transparent block should be detected", result.blockFound)
+        val width = result.blockBounds?.widthPx ?: 0f
+        assertTrue("Half-transparent block width should be >= 140px, got $width", width >= 140f)
+    }
+
+    @Test
     fun `linear and quadratic duration formulas respect bounds`() {
         val linearCfg = BotConfig(
             formulaMode = FormulaMode.LINEAR,

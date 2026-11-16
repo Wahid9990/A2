@@ -203,37 +203,51 @@ class ScreenCaptureService : Service() {
 
         stepJob = serviceScope.launch {
             AutomationBridge.singleStepRequests.collect {
-                executeSingleCycle()
+                executeSingleCycle(requireStability = false)
             }
         }
     }
 
-    private suspend fun executeSingleCycle(): Long {
+    private suspend fun executeSingleCycle(requireStability: Boolean = true): Long {
         val config = AutomationBridge.currentConfig.value
-        val bitmap = acquireLatestBitmap()
-        if (bitmap == null) {
-            return 300L
+        val overlayRect = AutomationBridge.overlayBounds.value
+
+        var stableResult = analyzeLatestFrame(config, overlayRect) ?: return 300L
+
+        if (requireStability && AutomationBridge.isAutoLoopActive.value) {
+            var checks = 0
+            while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
+                delay(150L)
+                val nextResult = analyzeLatestFrame(config, overlayRect)
+                if (nextResult != null &&
+                    stableResult.pawnFound && nextResult.pawnFound &&
+                    stableResult.blockFound && nextResult.blockFound &&
+                    kotlin.math.abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 8f &&
+                    kotlin.math.abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 6f
+                ) {
+                    stableResult = nextResult
+                    break
+                }
+                if (nextResult != null) {
+                    stableResult = nextResult
+                }
+                checks++
+            }
         }
 
-        val result = try {
-            BlockVisionAnalyzer.analyze(bitmap, config)
-        } finally {
-            bitmap.recycle()
-        }
+        AutomationBridge.updateAnalysis(stableResult)
 
-        AutomationBridge.updateAnalysis(result)
-
-        if (!result.pawnFound || !result.blockFound) {
-            AutomationBridge.appendLog(result.statusMessage, isError = true)
-            return 600L
+        if (!stableResult.pawnFound || !stableResult.blockFound) {
+            AutomationBridge.appendLog(stableResult.statusMessage, isError = true)
+            return 550L
         }
 
         val tapX = (screenWidth * config.tapXFraction).coerceIn(40f, screenWidth - 40f)
         val tapY = (screenHeight * config.tapYFraction).coerceIn(40f, screenHeight - 40f)
-        val holdMs = result.computedDurationMs
+        val holdMs = stableResult.computedDurationMs
 
         AutomationBridge.appendLog(
-            "D=${result.rawDistancePx.roundToInt()}px W=${result.blockBounds?.widthPx?.roundToInt() ?: 0}px → Hold ${holdMs}ms"
+            "D=${stableResult.rawDistancePx.roundToInt()}px W=${stableResult.blockBounds?.widthPx?.roundToInt() ?: 0}px → Hold ${holdMs}ms"
         )
 
         val completed = suspendCancellableCoroutine { cont ->
@@ -247,7 +261,19 @@ class ScreenCaptureService : Service() {
             return 800L
         }
 
-        return config.jumpCooldownMs.coerceAtLeast(500L)
+        return config.jumpCooldownMs.coerceAtLeast(600L)
+    }
+
+    private fun analyzeLatestFrame(
+        config: com.example.model.BotConfig,
+        overlayRect: android.graphics.Rect?
+    ): com.example.model.VisionAnalysisResult? {
+        val bitmap = acquireLatestBitmap() ?: return null
+        return try {
+            BlockVisionAnalyzer.analyze(bitmap, config, overlayRect)
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     private fun acquireLatestBitmap(): Bitmap? {

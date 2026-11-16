@@ -2,6 +2,7 @@ package com.example
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Rect
 import com.example.model.BotConfig
 import com.example.vision.BlockVisionAnalyzer
 import org.junit.Assert.assertTrue
@@ -36,6 +37,7 @@ class RealGameScreenshotTest {
     fun `analyzes user game screenshot 1 (right jump)`() {
         val bmp = loadWorkspaceImageOrSkip("public/assets/aistudio/Screenshot_20261116_073732_4fd83fcee830ed007aacc9cec66270f7_30a41bc7.jpg")
         val result = BlockVisionAnalyzer.analyze(bmp, BotConfig())
+        println("SCREENSHOT 1 => $result")
         assertTrue("Pawn should be detected on screenshot 1: ${result.statusMessage}", result.pawnFound)
         assertTrue("Block should be detected on screenshot 1: ${result.statusMessage}", result.blockFound)
         assertTrue("S1 block width should be > 200px, got ${result.blockBounds?.widthPx}", (result.blockBounds?.widthPx ?: 0f) > 200f)
@@ -44,13 +46,29 @@ class RealGameScreenshotTest {
     }
 
     @Test
-    fun `analyzes user game screenshot 2 (left chest jump)`() {
+    fun `analyzes user game screenshot 2 (left chest jump without platform rim drift)`() {
         val bmp = loadWorkspaceImageOrSkip("public/assets/aistudio/Screenshot_20261116_073749_4fd83fcee830ed007aacc9cec66270f7_227dd93d.jpg")
         val result = BlockVisionAnalyzer.analyze(bmp, BotConfig())
+        println("SCREENSHOT 2 => $result")
         assertTrue("Pawn should be detected on screenshot 2: ${result.statusMessage}", result.pawnFound)
+        assertTrue("S2 pawn base Y should not drift onto blue rim (< 1005), got ${result.pawnBaseY}", result.pawnBaseY < 1005f)
         assertTrue("Block should be detected on screenshot 2: ${result.statusMessage}", result.blockFound)
         assertTrue("S2 chest width should be > 200px, got ${result.blockBounds?.widthPx}", (result.blockBounds?.widthPx ?: 0f) > 200f)
         assertTrue("S2 pawn X should be on right side (> 420), got ${result.pawnCenterX}", result.pawnCenterX > 420f)
         assertTrue("S2 chest X should be on left side (< 260), got ${result.blockBounds?.center?.x}", (result.blockBounds?.center?.x ?: 999f) < 260f)
+    }
+
+    @Test
+    fun `analyzes user game screenshot 3 (score 47 occluded pawn, ninja block, HUD excluded)`() {
+        val bmp = loadWorkspaceImageOrSkip("public/assets/aistudio/Screenshot_20261116_084330_4fd83fcee830ed007aacc9cec66270f7_41ad5824.jpg")
+        // Exclude the floating HUD rectangle shown in screenshot 3
+        val hudRect = Rect(30, 280, 490, 475)
+        val result = BlockVisionAnalyzer.analyze(bmp, BotConfig(), excludedRect = hudRect)
+        println("SCREENSHOT 3 => $result")
+        assertTrue("Pawn should be detected on screenshot 3: ${result.statusMessage}", result.pawnFound)
+        assertTrue("S3 pawn X should lock on real pawn (~326), not ninja block (~520), got ${result.pawnCenterX}", result.pawnCenterX in 295f..360f)
+        assertTrue("Block should be detected on screenshot 3: ${result.statusMessage}", result.blockFound)
+        assertTrue("S3 target block X should lock on ninja block (~505), got ${result.blockBounds?.center?.x}", (result.blockBounds?.center?.x ?: 0f) in 460f..560f)
+        assertTrue("S3 ninja block width should be > 200px, got ${result.blockBounds?.widthPx}", (result.blockBounds?.widthPx ?: 0f) > 200f)
     }
 }

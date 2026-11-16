@@ -80,9 +80,9 @@ fun GuideScreen(modifier: Modifier = Modifier) {
                     title = "2. Screen-Reading & Block Size Logic",
                     accent = MaterialTheme.colorScheme.secondary,
                     bullets = listOf(
-                        "Pawn Lock: Scans ROI for pixels matching pawnColorRgb within tolerance, taking trimmed quantiles (10th–90th X, 95th Y) to find the pawn's base foot coordinate (Px, Py).",
-                        "Background Interpolation: Samples left and right margin pixels per scanline and linearly interpolates Bg(x) to stay accurate over sky gradients.",
-                        "Apex & Block Width: Scans top-to-bottom skipping the pawn's X exclusion column to locate the highest foreground row (apexX, apexY), then traces downward along the uniform top-face color to find widestRowY, blockWidthPx, and geometric center (Bx, By)."
+                        "Smart Pawn Lock: Uses BFS connected-component clustering with silhouette & golden-collar scoring so wide dark blocks never steal the pawn lock, and projects true foot Y if occluded behind a tall block.",
+                        "HUD Masking & Dual-Frame Stability: Automatically masks the Floating HUD bounds from frame analysis and verifies two consecutive frames match before auto-jumping.",
+                        "Two-Pass Translucent Block Detection: Scans with standard contrast first, then checks upward and falls back to a shadow-rejecting translucent pass for half-transparent glass blocks."
                     )
                 )
             }

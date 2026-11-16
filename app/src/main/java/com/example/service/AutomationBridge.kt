@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.graphics.Rect
 import com.example.model.BotConfig
 import com.example.model.BotLogEntry
 import com.example.model.VisionAnalysisResult
@@ -30,6 +31,9 @@ object AutomationBridge {
 
     private val _isOverlayActive = MutableStateFlow(false)
     val isOverlayActive: StateFlow<Boolean> = _isOverlayActive.asStateFlow()
+
+    private val _overlayBounds = MutableStateFlow<Rect?>(null)
+    val overlayBounds: StateFlow<Rect?> = _overlayBounds.asStateFlow()
 
     private val _isAutoLoopActive = MutableStateFlow(false)
     val isAutoLoopActive: StateFlow<Boolean> = _isAutoLoopActive.asStateFlow()
@@ -66,6 +70,13 @@ object AutomationBridge {
 
     fun setOverlayActive(active: Boolean) {
         _isOverlayActive.value = active
+        if (!active) {
+            _overlayBounds.value = null
+        }
+    }
+
+    fun setOverlayBounds(rect: Rect?) {
+        _overlayBounds.value = rect
     }
 
     fun setAutoLoopActive(active: Boolean) {

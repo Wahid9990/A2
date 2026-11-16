@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Rect
 import android.graphics.Shader
 import com.example.model.BlockBounds
 import com.example.model.BotConfig
@@ -21,7 +22,31 @@ import kotlin.math.roundToLong
 
 object BlockVisionAnalyzer {
 
-    fun analyze(bitmap: Bitmap, config: BotConfig): VisionAnalysisResult {
+    private data class PawnCandidate(
+        val xs: List<Int>,
+        val ys: List<Int>,
+        val minX: Int,
+        val maxX: Int,
+        val minY: Int,
+        val maxY: Int,
+        val score: Int
+    )
+
+    private data class BlockTrace(
+        val apexX: Float,
+        val apexY: Int,
+        val widestRowY: Int,
+        val maxTopWidth: Int,
+        val widestLeftX: Float,
+        val widestRightX: Float,
+        val lastTopRowY: Int
+    )
+
+    fun analyze(
+        bitmap: Bitmap,
+        config: BotConfig,
+        excludedRect: Rect? = null
+    ): VisionAnalysisResult {
         val startNs = System.nanoTime()
         val width = bitmap.width
         val height = bitmap.height
@@ -56,69 +81,25 @@ object BlockVisionAnalyzer {
         val pixels = IntArray(width * roiHeight)
         bitmap.getPixels(pixels, 0, width, 0, roiTop, width, roiHeight)
 
-        val targetR = (config.pawnColorRgb shr 16) and 0xFF
-        val targetG = (config.pawnColorRgb shr 8) and 0xFF
-        val targetB = config.pawnColorRgb and 0xFF
-        val pawnTolSq = config.pawnColorTolerance * config.pawnColorTolerance * 3
-
         val step = max(1, width / 540)
         val marginX = max(8, (width * 0.03f).roundToInt())
         val bgThresholdSq = config.bgDiffThreshold * config.bgDiffThreshold * 3
 
-        // Step 1: Detect the Pawn cluster matching pawnColorRgb (and distinct from row background)
-        val rawPawnXs = ArrayList<Int>(256)
-        val rawPawnYs = ArrayList<Int>(256)
+        // Step 1: Detect the Pawn using connected-component clustering + collar/silhouette scoring
+        val pawn = detectPawn(
+            pixels = pixels,
+            width = width,
+            height = height,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            marginX = marginX,
+            step = step,
+            config = config,
+            bgThresholdSq = bgThresholdSq,
+            excludedRect = excludedRect
+        )
 
-        var y = 0
-        while (y < roiHeight) {
-            val rowOffset = y * width
-            val leftBg = pixels[rowOffset + marginX / 2]
-            val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
-            var x = marginX
-            while (x < width - marginX) {
-                val c = pixels[rowOffset + x]
-                if (isForegroundPixel(c, leftBg, rightBg, x, width, bgThresholdSq / 2)) {
-                    val r = (c shr 16) and 0xFF
-                    val g = (c shr 8) and 0xFF
-                    val b = c and 0xFF
-                    val dr = r - targetR
-                    val dg = g - targetG
-                    val db = b - targetB
-                    val distSq = dr * dr + dg * dg + db * db
-                    if (distSq <= pawnTolSq) {
-                        rawPawnXs.add(x)
-                        rawPawnYs.add(roiTop + y)
-                    }
-                }
-                x += step
-            }
-            y += step
-        }
-
-        // Keep only the densest spatial cluster around the peak 2D bucket so distant shadows/noise cannot pull the pawn coordinate
-        val cellSize = max(24, (width * 0.05f).roundToInt())
-        val bucketCounts = HashMap<Long, Int>()
-        for (i in rawPawnXs.indices) {
-            val key = ((rawPawnXs[i] / cellSize).toLong() shl 32) or ((rawPawnYs[i] / cellSize).toLong() and 0xFFFFFFFFL)
-            bucketCounts[key] = (bucketCounts[key] ?: 0) + 1
-        }
-        val peakEntry = bucketCounts.maxByOrNull { it.value }
-        val pawnXs = ArrayList<Int>(256)
-        val pawnYs = ArrayList<Int>(256)
-        if (peakEntry != null) {
-            val peakCx = ((peakEntry.key shr 32).toInt() + 0.5f) * cellSize
-            val peakCy = ((peakEntry.key and 0xFFFFFFFFL).toInt() + 0.5f) * cellSize
-            val clusterRadiusX = max(48f, width * 0.09f)
-            val clusterRadiusY = max(90f, height * 0.10f)
-            for (i in rawPawnXs.indices) {
-                if (abs(rawPawnXs[i] - peakCx) <= clusterRadiusX && abs(rawPawnYs[i] - peakCy) <= clusterRadiusY) {
-                    pawnXs.add(rawPawnXs[i])
-                    pawnYs.add(rawPawnYs[i])
-                }
-            }
-        }
-
-        if (pawnXs.size < 6) {
+        if (pawn == null) {
             val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
             return VisionAnalysisResult(
                 imageWidth = width,
@@ -128,7 +109,7 @@ object BlockVisionAnalyzer {
                 pawnFound = false,
                 pawnCenterX = 0f,
                 pawnBaseY = 0f,
-                pawnPixelCount = pawnXs.size,
+                pawnPixelCount = 0,
                 blockFound = false,
                 blockBounds = null,
                 rawDistancePx = 0f,
@@ -136,150 +117,92 @@ object BlockVisionAnalyzer {
                 computedDurationMs = 0L,
                 safeMarginMs = 0L,
                 analysisTimeMs = elapsedMs,
-                statusMessage = "Pawn not found (${pawnXs.size} px matched). Sample pawn color in Calibrate."
+                statusMessage = "Pawn not found. Sample pawn color in Calibrate."
             )
         }
 
-        pawnXs.sort()
-        pawnYs.sort()
-        val p10Idx = (pawnXs.size * 0.10f).toInt().coerceIn(0, pawnXs.lastIndex)
-        val p90Idx = (pawnXs.size * 0.90f).toInt().coerceIn(0, pawnXs.lastIndex)
-        val p95YIdx = (pawnYs.size * 0.95f).toInt().coerceIn(0, pawnYs.lastIndex)
-        val p05YIdx = (pawnYs.size * 0.05f).toInt().coerceIn(0, pawnYs.lastIndex)
+        val sortedXs = pawn.xs.sorted()
+        val sortedYs = pawn.ys.sorted()
+        val p10X = sortedXs[(sortedXs.size * 0.10f).toInt().coerceIn(0, sortedXs.lastIndex)]
+        val p90X = sortedXs[(sortedXs.size * 0.90f).toInt().coerceIn(0, sortedXs.lastIndex)]
+        val p05Y = sortedYs[(sortedYs.size * 0.05f).toInt().coerceIn(0, sortedYs.lastIndex)]
+        val p95Y = sortedYs[(sortedYs.size * 0.95f).toInt().coerceIn(0, sortedYs.lastIndex)]
 
-        val pawnCenterX = (pawnXs[p10Idx] + pawnXs[p90Idx]) / 2f
-        val pawnBaseY = pawnYs[p95YIdx].toFloat()
-        val pawnTopY = pawnYs[p05YIdx].toFloat()
-        val pawnWidthEstimate = (pawnXs[p90Idx] - pawnXs[p10Idx]).coerceAtLeast((width * 0.045f).roundToInt())
-        val pawnExclusionRadius = max((pawnWidthEstimate * 1.15f).roundToInt(), (width * 0.07f).roundToInt())
+        val pawnCenterX = (p10X + p90X) / 2f
+        val pawnTopY = p05Y.toFloat()
+        val observedHeight = (p95Y - p05Y).toFloat()
+        val expectedPawnHeight = width * 0.164f
+        val pawnBaseY = if (observedHeight < expectedPawnHeight * 0.72f) {
+            // Pawn lower body is occluded behind a tall foreground block; project true base from head top
+            (pawnTopY + expectedPawnHeight).coerceAtMost(roiBottom.toFloat())
+        } else {
+            p95Y.toFloat()
+        }
 
-        // Step 2 & 3: Scan top-to-bottom in ROI, skipping small particles/stars until a valid platform block is traced
+        val pawnWidthEstimate = (p90X - p10X).coerceAtLeast((width * 0.045f).roundToInt())
+        val pawnExclusionRadius = max((pawnWidthEstimate * 1.35f).roundToInt(), (width * 0.08f).roundToInt())
+
+        // Step 2: Two-pass target block detection (opaque blocks + half-transparent/glass blocks)
         val minRunLength = max(6, (width * 0.014f).roundToInt())
         val minValidBlockWidth = max(45, (width * 0.08f).roundToInt())
         val minValidBlockHeight = max(18, (height * 0.015f).roundToInt())
-        val maxBlockScanY = (pawnBaseY - roiTop - 6).roundToInt().coerceIn(0, roiHeight - 1)
+        val translucentThreshold = max(12, config.bgDiffThreshold / 2)
+        val translucentThresholdSq = translucentThreshold * translucentThreshold * 3
 
-        var foundApexX = -1f
-        var foundApexY = -1
-        var widestRowY = 0
-        var maxTopWidth = 0
-        var widestLeftX = 0f
-        var widestRightX = 0f
-        var lastTopRowY = 0
-        var endWidth = 0
-        var blockFound = false
+        var block = scanForTargetBlock(
+            pixels = pixels,
+            width = width,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            marginX = marginX,
+            step = step,
+            pawnCenterX = pawnCenterX,
+            pawnTopY = pawnTopY,
+            pawnBaseY = pawnBaseY,
+            pawnExclusionRadius = pawnExclusionRadius,
+            excludedRect = excludedRect,
+            thresholdSq = bgThresholdSq,
+            minRunLength = minRunLength,
+            minValidBlockWidth = minValidBlockWidth,
+            minValidBlockHeight = minValidBlockHeight,
+            rejectDarkShadows = false
+        )
 
-        var ry = 0
-        while (ry <= maxBlockScanY) {
-            val rowOffset = ry * width
-            val leftBg = pixels[rowOffset + marginX / 2]
-            val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
-
-            var candidateApexX = -1f
-            var runStart = -1
-            var runCount = 0
-
-            var x = marginX
-            while (x < width - marginX) {
-                val absY = roiTop + ry
-                val inPawnColumn = abs(x - pawnCenterX) < pawnExclusionRadius && absY >= (pawnTopY - 40f)
-                if (!inPawnColumn && isForegroundPixel(pixels[rowOffset + x], leftBg, rightBg, x, width, bgThresholdSq)) {
-                    if (runStart < 0) runStart = x
-                    runCount++
-                } else {
-                    if (runCount >= minRunLength) {
-                        candidateApexX = (runStart + (x - step)) / 2f
-                        break
-                    }
-                    runStart = -1
-                    runCount = 0
-                }
-                x += step
-            }
-            if (candidateApexX < 0f && runCount >= minRunLength) {
-                candidateApexX = (runStart + (width - marginX)) / 2f
-            }
-
-            if (candidateApexX >= 0f) {
-                // Trace downward from (candidateApexX, ry) to verify this is a real platform block (not a star/particle)
-                var cWidestRowY = ry
-                var cMaxTopWidth = 0
-                var cWidestLeftX = candidateApexX
-                var cWidestRightX = candidateApexX
-                var cLastTopRowY = ry
-                var cEndWidth = 0
-                var plateauRows = 0
-                val maxTraceY = min(roiHeight - 1, ry + (width * 0.25f).roundToInt())
-                var traceCenterX = candidateApexX.roundToInt().coerceIn(marginX, width - marginX - 1)
-
-                for (ty in ry..maxTraceY) {
-                    val tOffset = ty * width
-                    val tLeftBg = pixels[tOffset + marginX / 2]
-                    val tRightBg = pixels[tOffset + width - 1 - marginX / 2]
-
-                    val seedPx = pixels[tOffset + traceCenterX]
-                    if (!isForegroundPixel(seedPx, tLeftBg, tRightBg, traceCenterX, width, bgThresholdSq)) {
-                        if (ty - ry > 6) break
-                        continue
-                    }
-
-                    var lx = traceCenterX
-                    while (lx > marginX) {
-                        val px = pixels[tOffset + lx - 1]
-                        if (!isForegroundPixel(px, tLeftBg, tRightBg, lx - 1, width, bgThresholdSq)) break
-                        lx--
-                    }
-
-                    var rx = traceCenterX
-                    while (rx < width - marginX - 1) {
-                        val px = pixels[tOffset + rx + 1]
-                        if (!isForegroundPixel(px, tLeftBg, tRightBg, rx + 1, width, bgThresholdSq)) break
-                        rx++
-                    }
-
-                    val rowWidth = rx - lx
-                    if (rowWidth >= 4) {
-                        cLastTopRowY = ty
-                        cEndWidth = rowWidth
-                        traceCenterX = ((lx + rx) / 2).coerceIn(marginX, width - marginX - 1)
-
-                        if (rowWidth > cMaxTopWidth + 3) {
-                            cMaxTopWidth = rowWidth
-                            cWidestRowY = ty
-                            cWidestLeftX = lx.toFloat()
-                            cWidestRightX = rx.toFloat()
-                            plateauRows = 0
-                        } else if (cMaxTopWidth >= minValidBlockWidth) {
-                            plateauRows++
-                            if (plateauRows >= 16) {
-                                break
-                            }
-                        }
-                    }
-                }
-
-                val cHeight = cLastTopRowY - ry
-                if (cMaxTopWidth >= minValidBlockWidth && cHeight >= minValidBlockHeight) {
-                    foundApexX = candidateApexX
-                    foundApexY = ry
-                    widestRowY = cWidestRowY
-                    maxTopWidth = cMaxTopWidth
-                    widestLeftX = cWidestLeftX
-                    widestRightX = cWidestRightX
-                    lastTopRowY = cLastTopRowY
-                    endWidth = cEndWidth
-                    blockFound = true
-                    break
-                } else {
-                    // Reject tiny star/sparkle and resume scanning below it
-                    ry = max(ry + 1, cLastTopRowY + 2)
-                    continue
-                }
-            }
-            ry++
+        if (block != null) {
+            // Check upward for a semi-transparent top half above a colored lower half
+            block = extendTranslucentTopApex(
+                pixels = pixels,
+                width = width,
+                roiHeight = roiHeight,
+                marginX = marginX,
+                excludedRect = excludedRect,
+                roiTop = roiTop,
+                baseBlock = block,
+                translucentThresholdSq = translucentThresholdSq
+            )
+        } else {
+            // Pass 2: Full translucent / glass block fallback (rejecting dark drop shadows)
+            block = scanForTargetBlock(
+                pixels = pixels,
+                width = width,
+                roiTop = roiTop,
+                roiHeight = roiHeight,
+                marginX = marginX,
+                step = step,
+                pawnCenterX = pawnCenterX,
+                pawnTopY = pawnTopY,
+                pawnBaseY = pawnBaseY,
+                pawnExclusionRadius = pawnExclusionRadius,
+                excludedRect = excludedRect,
+                thresholdSq = translucentThresholdSq,
+                minRunLength = minRunLength,
+                minValidBlockWidth = minValidBlockWidth,
+                minValidBlockHeight = minValidBlockHeight,
+                rejectDarkShadows = true
+            )
         }
 
-        if (!blockFound) {
+        if (block == null) {
             val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
             return VisionAnalysisResult(
                 imageWidth = width,
@@ -289,7 +212,7 @@ object BlockVisionAnalyzer {
                 pawnFound = true,
                 pawnCenterX = pawnCenterX,
                 pawnBaseY = pawnBaseY,
-                pawnPixelCount = pawnXs.size,
+                pawnPixelCount = pawn.xs.size,
                 blockFound = false,
                 blockBounds = null,
                 rawDistancePx = 0f,
@@ -301,18 +224,22 @@ object BlockVisionAnalyzer {
             )
         }
 
-        val isIsometricDiamond = widestRowY > foundApexY + 6
+        // Step 3: Compute isometric geometric landing center
+        val isIsometricDiamond = block.widestRowY > block.apexY + 6
+        val midpointX = (block.widestLeftX + block.widestRightX) / 2f
+        val blockCenterX = block.apexX * 0.35f + midpointX * 0.65f
         val blockCenterYRel = if (isIsometricDiamond) {
-            widestRowY.toFloat()
+            val projectedEquator = block.apexY + block.maxTopWidth * 0.285f
+            (block.widestRowY * 0.5f + projectedEquator * 0.5f)
         } else {
-            (foundApexY + lastTopRowY) / 2f
+            (block.apexY + block.lastTopRowY) / 2f
         }
-        val blockCenterX = (foundApexX + (widestLeftX + widestRightX) / 2f) / 2f
+
         val blockCenterY = roiTop + blockCenterYRel
-        val blockTopY = (roiTop + foundApexY).toFloat()
-        val blockBottomY = (roiTop + lastTopRowY).toFloat()
-        val blockWidthPx = maxTopWidth.coerceAtLeast(minRunLength).toFloat()
-        val blockHeightPx = (lastTopRowY - foundApexY).coerceAtLeast(1).toFloat()
+        val blockTopY = (roiTop + block.apexY).toFloat()
+        val blockBottomY = (roiTop + block.lastTopRowY).toFloat()
+        val blockWidthPx = block.maxTopWidth.coerceAtLeast(minRunLength).toFloat()
+        val blockHeightPx = (block.lastTopRowY - block.apexY).coerceAtLeast(1).toFloat()
 
         // Step 4: Distance & Duration Calculation
         val dx = blockCenterX - pawnCenterX
@@ -334,13 +261,13 @@ object BlockVisionAnalyzer {
             pawnFound = true,
             pawnCenterX = pawnCenterX,
             pawnBaseY = pawnBaseY,
-            pawnPixelCount = pawnXs.size,
+            pawnPixelCount = pawn.xs.size,
             blockFound = true,
             blockBounds = BlockBounds(
-                apex = PointF2D(foundApexX, blockTopY),
+                apex = PointF2D(block.apexX, blockTopY),
                 center = PointF2D(blockCenterX, blockCenterY),
-                leftEdgeX = widestLeftX,
-                rightEdgeX = widestRightX,
+                leftEdgeX = block.widestLeftX,
+                rightEdgeX = block.widestRightX,
                 topY = blockTopY,
                 bottomY = blockBottomY,
                 widthPx = blockWidthPx,
@@ -355,6 +282,416 @@ object BlockVisionAnalyzer {
         )
     }
 
+    private fun detectPawn(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+        roiTop: Int,
+        roiHeight: Int,
+        marginX: Int,
+        step: Int,
+        config: BotConfig,
+        bgThresholdSq: Int,
+        excludedRect: Rect?
+    ): PawnCandidate? {
+        val targetR = (config.pawnColorRgb shr 16) and 0xFF
+        val targetG = (config.pawnColorRgb shr 8) and 0xFF
+        val targetB = config.pawnColorRgb and 0xFF
+        val pawnTolSq = config.pawnColorTolerance * config.pawnColorTolerance * 3
+
+        val cellSize = max(12, width / 48)
+        val cellBuckets = HashMap<Long, Pair<MutableList<Int>, MutableList<Int>>>()
+
+        var y = 0
+        while (y < roiHeight) {
+            val rowOffset = y * width
+            val absY = roiTop + y
+            val leftBg = pixels[rowOffset + marginX / 2]
+            val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
+            var x = marginX
+            while (x < width - marginX) {
+                if (!isExcluded(x, absY, excludedRect)) {
+                    val c = pixels[rowOffset + x]
+                    if (isForegroundPixel(c, leftBg, rightBg, x, width, bgThresholdSq / 2)) {
+                        val r = (c shr 16) and 0xFF
+                        val g = (c shr 8) and 0xFF
+                        val b = c and 0xFF
+                        val dr = r - targetR
+                        val dg = g - targetG
+                        val db = b - targetB
+                        if (dr * dr + dg * dg + db * db <= pawnTolSq) {
+                            val gx = x / cellSize
+                            val gy = absY / cellSize
+                            val key = (gx.toLong() shl 32) or (gy.toLong() and 0xFFFFFFFFL)
+                            val pair = cellBuckets.getOrPut(key) {
+                                ArrayList<Int>(16) to ArrayList(16)
+                            }
+                            pair.first.add(x)
+                            pair.second.add(absY)
+                        }
+                    }
+                }
+                x += step
+            }
+            y += step
+        }
+
+        if (cellBuckets.isEmpty()) return null
+
+        val visited = HashSet<Long>(cellBuckets.size)
+        val queue = ArrayDeque<Long>()
+        var bestCandidate: PawnCandidate? = null
+
+        for (startKey in cellBuckets.keys) {
+            if (!visited.add(startKey)) continue
+            queue.clear()
+            queue.add(startKey)
+
+            val compXs = ArrayList<Int>(128)
+            val compYs = ArrayList<Int>(128)
+            var minX = Int.MAX_VALUE
+            var maxX = Int.MIN_VALUE
+            var minY = Int.MAX_VALUE
+            var maxY = Int.MIN_VALUE
+
+            while (queue.isNotEmpty()) {
+                val key = queue.removeFirst()
+                val data = cellBuckets[key] ?: continue
+                for (i in data.first.indices) {
+                    val px = data.first[i]
+                    val py = data.second[i]
+                    compXs.add(px)
+                    compYs.add(py)
+                    if (px < minX) minX = px
+                    if (px > maxX) maxX = px
+                    if (py < minY) minY = py
+                    if (py > maxY) maxY = py
+                }
+
+                val gx = (key shr 32).toInt()
+                val gy = (key and 0xFFFFFFFFL).toInt()
+                for (dx in -1..1) {
+                    for (dy in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val neighbor = ((gx + dx).toLong() shl 32) or ((gy + dy).toLong() and 0xFFFFFFFFL)
+                        if (cellBuckets.containsKey(neighbor) && visited.add(neighbor)) {
+                            queue.add(neighbor)
+                        }
+                    }
+                }
+            }
+
+            if (compXs.size < 6) continue
+
+            val compW = maxX - minX
+            val compH = maxY - minY
+
+            // Reject massive wide blocks (e.g., dark block walls)
+            if (compW > width * 0.14f) continue
+            if (compW > compH * 1.6f && compW > width * 0.08f) continue
+
+            // Check for warm gold collar signature near this component
+            var collarHits = 0
+            val scanMinX = (minX - 6).coerceIn(marginX, width - marginX - 1)
+            val scanMaxX = (maxX + 6).coerceIn(marginX, width - marginX - 1)
+            val scanMinY = (minY - roiTop - 10).coerceIn(0, roiHeight - 1)
+            val scanMaxY = (maxY - roiTop + 28).coerceIn(0, roiHeight - 1)
+            var cy = scanMinY
+            while (cy <= scanMaxY) {
+                val rowOff = cy * width
+                var cx = scanMinX
+                while (cx <= scanMaxX) {
+                    val px = pixels[rowOff + cx]
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8) and 0xFF
+                    val b = px and 0xFF
+                    if (r > 160 && g > 115 && b < 130 && (r - b) > 50) {
+                        collarHits++
+                    }
+                    cx += 2
+                }
+                cy += 2
+            }
+
+            var score = compXs.size.coerceAtMost(2800)
+            if (compW <= width * 0.09f) score += 1200
+            if (compH >= compW * 1.1f) score += 1000
+            if (collarHits >= 3) score += 6000
+            if (compW > width * 0.105f) score -= 3000
+
+            val candidate = PawnCandidate(compXs, compYs, minX, maxX, minY, maxY, score)
+            if (bestCandidate == null || candidate.score > bestCandidate.score) {
+                bestCandidate = candidate
+            }
+        }
+
+        return bestCandidate
+    }
+
+    private fun scanForTargetBlock(
+        pixels: IntArray,
+        width: Int,
+        roiTop: Int,
+        roiHeight: Int,
+        marginX: Int,
+        step: Int,
+        pawnCenterX: Float,
+        pawnTopY: Float,
+        pawnBaseY: Float,
+        pawnExclusionRadius: Int,
+        excludedRect: Rect?,
+        thresholdSq: Int,
+        minRunLength: Int,
+        minValidBlockWidth: Int,
+        minValidBlockHeight: Int,
+        rejectDarkShadows: Boolean
+    ): BlockTrace? {
+        val maxBlockScanY = (pawnBaseY - roiTop - 10).roundToInt().coerceIn(0, roiHeight - 1)
+        var ry = 0
+        while (ry <= maxBlockScanY) {
+            val rowOffset = ry * width
+            val absY = roiTop + ry
+            val leftBg = pixels[rowOffset + marginX / 2]
+            val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
+
+            var candidateApexX = -1f
+            var runStart = -1
+            var runCount = 0
+
+            var x = marginX
+            while (x < width - marginX) {
+                val inPawnColumn = abs(x - pawnCenterX) < pawnExclusionRadius && absY >= (pawnTopY - 40f)
+                val excluded = isExcluded(x, absY, excludedRect)
+                val isFg = !inPawnColumn && !excluded && isValidBlockPixel(
+                    pixels[rowOffset + x],
+                    leftBg,
+                    rightBg,
+                    x,
+                    width,
+                    thresholdSq,
+                    rejectDarkShadows
+                )
+                if (isFg) {
+                    if (runStart < 0) runStart = x
+                    runCount++
+                } else {
+                    if (runCount >= minRunLength) {
+                        candidateApexX = (runStart + (x - step)) / 2f
+                        break
+                    }
+                    runStart = -1
+                    runCount = 0
+                }
+                x += step
+            }
+            if (candidateApexX < 0f && runCount >= minRunLength) {
+                candidateApexX = (runStart + (width - marginX)) / 2f
+            }
+
+            if (candidateApexX >= 0f) {
+                val traced = traceBlockDownward(
+                    pixels = pixels,
+                    width = width,
+                    roiTop = roiTop,
+                    roiHeight = roiHeight,
+                    marginX = marginX,
+                    startY = ry,
+                    apexX = candidateApexX,
+                    minValidBlockWidth = minValidBlockWidth,
+                    excludedRect = excludedRect,
+                    thresholdSq = thresholdSq,
+                    rejectDarkShadows = rejectDarkShadows
+                )
+                val cHeight = traced.lastTopRowY - ry
+                val centerX = (traced.widestLeftX + traced.widestRightX) / 2f
+                val centerY = roiTop + traced.widestRowY.toFloat()
+                val distFromPawn = hypot(centerX - pawnCenterX, centerY - pawnBaseY)
+                val overlapsPawnBase = pawnCenterX in (traced.widestLeftX - 10f)..(traced.widestRightX + 10f) &&
+                    pawnBaseY in (roiTop + ry - 8f)..(roiTop + traced.lastTopRowY + width * 0.14f)
+
+                if (traced.maxTopWidth >= minValidBlockWidth &&
+                    cHeight >= minValidBlockHeight &&
+                    distFromPawn >= width * 0.10f &&
+                    !overlapsPawnBase &&
+                    centerY < pawnBaseY - 12f
+                ) {
+                    return traced
+                } else {
+                    ry = max(ry + 1, traced.lastTopRowY + 2)
+                    continue
+                }
+            }
+            ry++
+        }
+        return null
+    }
+
+    private fun traceBlockDownward(
+        pixels: IntArray,
+        width: Int,
+        roiTop: Int,
+        roiHeight: Int,
+        marginX: Int,
+        startY: Int,
+        apexX: Float,
+        minValidBlockWidth: Int,
+        excludedRect: Rect?,
+        thresholdSq: Int,
+        rejectDarkShadows: Boolean
+    ): BlockTrace {
+        var cWidestRowY = startY
+        var cMaxTopWidth = 0
+        var cWidestLeftX = apexX
+        var cWidestRightX = apexX
+        var cLastTopRowY = startY
+        var plateauRows = 0
+        val maxTraceY = min(roiHeight - 1, startY + (width * 0.25f).roundToInt())
+        var traceCenterX = apexX.roundToInt().coerceIn(marginX, width - marginX - 1)
+
+        for (ty in startY..maxTraceY) {
+            val tOffset = ty * width
+            val absY = roiTop + ty
+            val tLeftBg = pixels[tOffset + marginX / 2]
+            val tRightBg = pixels[tOffset + width - 1 - marginX / 2]
+
+            if (isExcluded(traceCenterX, absY, excludedRect)) {
+                if (ty - startY > 6) break
+                continue
+            }
+
+            val seedPx = pixels[tOffset + traceCenterX]
+            if (!isValidBlockPixel(seedPx, tLeftBg, tRightBg, traceCenterX, width, thresholdSq, rejectDarkShadows)) {
+                if (ty - startY > 6) break
+                continue
+            }
+
+            var lx = traceCenterX
+            while (lx > marginX) {
+                if (isExcluded(lx - 1, absY, excludedRect)) break
+                val px = pixels[tOffset + lx - 1]
+                if (!isValidBlockPixel(px, tLeftBg, tRightBg, lx - 1, width, thresholdSq, rejectDarkShadows)) break
+                lx--
+            }
+
+            var rx = traceCenterX
+            while (rx < width - marginX - 1) {
+                if (isExcluded(rx + 1, absY, excludedRect)) break
+                val px = pixels[tOffset + rx + 1]
+                if (!isValidBlockPixel(px, tLeftBg, tRightBg, rx + 1, width, thresholdSq, rejectDarkShadows)) break
+                rx++
+            }
+
+            val rowWidth = rx - lx
+            if (rowWidth >= 4) {
+                cLastTopRowY = ty
+                traceCenterX = ((lx + rx) / 2).coerceIn(marginX, width - marginX - 1)
+
+                if (rowWidth > cMaxTopWidth + 3) {
+                    cMaxTopWidth = rowWidth
+                    cWidestRowY = ty
+                    cWidestLeftX = lx.toFloat()
+                    cWidestRightX = rx.toFloat()
+                    plateauRows = 0
+                } else if (cMaxTopWidth >= minValidBlockWidth) {
+                    plateauRows++
+                    if (plateauRows >= 16) {
+                        break
+                    }
+                }
+            }
+        }
+
+        return BlockTrace(
+            apexX = apexX,
+            apexY = startY,
+            widestRowY = cWidestRowY,
+            maxTopWidth = cMaxTopWidth,
+            widestLeftX = cWidestLeftX,
+            widestRightX = cWidestRightX,
+            lastTopRowY = cLastTopRowY
+        )
+    }
+
+    /**
+     * Handles half-transparent blocks where the upper half is faint translucent glass and the
+     * lower half is solid/colored. Looks upward from [baseBlock.apexY] for a brighter/translucent top apex.
+     */
+    private fun extendTranslucentTopApex(
+        pixels: IntArray,
+        width: Int,
+        roiHeight: Int,
+        marginX: Int,
+        excludedRect: Rect?,
+        roiTop: Int,
+        baseBlock: BlockTrace,
+        translucentThresholdSq: Int
+    ): BlockTrace {
+        val searchStart = (baseBlock.apexY - (baseBlock.maxTopWidth * 0.42f).roundToInt()).coerceAtLeast(0)
+        val probeHalfW = (baseBlock.maxTopWidth * 0.35f).roundToInt().coerceAtLeast(16)
+        val centerX = ((baseBlock.widestLeftX + baseBlock.widestRightX) / 2f).roundToInt()
+        val scanMinX = (centerX - probeHalfW).coerceAtLeast(marginX)
+        val scanMaxX = (centerX + probeHalfW).coerceAtMost(width - marginX - 1)
+
+        var newApexY = baseBlock.apexY
+        var newApexX = baseBlock.apexX
+        var consecutiveEmpty = 0
+
+        for (ry in (baseBlock.apexY - 1) downTo searchStart) {
+            val rowOffset = ry * width
+            val absY = roiTop + ry
+            val leftBg = pixels[rowOffset + marginX / 2]
+            val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
+
+            var runStart = -1
+            var runLen = 0
+            var bestRunStart = -1
+            var bestRunLen = 0
+
+            for (x in scanMinX..scanMaxX) {
+                if (!isExcluded(x, absY, excludedRect) &&
+                    isValidBlockPixel(pixels[rowOffset + x], leftBg, rightBg, x, width, translucentThresholdSq, rejectDarkShadows = true)
+                ) {
+                    if (runStart < 0) runStart = x
+                    runLen++
+                    if (runLen > bestRunLen) {
+                        bestRunLen = runLen
+                        bestRunStart = runStart
+                    }
+                } else {
+                    runStart = -1
+                    runLen = 0
+                }
+            }
+
+            if (bestRunLen >= 6) {
+                newApexY = ry
+                newApexX = bestRunStart + bestRunLen / 2f
+                consecutiveEmpty = 0
+            } else {
+                consecutiveEmpty++
+                if (consecutiveEmpty >= 4) break
+            }
+        }
+
+        if (baseBlock.apexY - newApexY < 6) return baseBlock
+
+        return traceBlockDownward(
+            pixels = pixels,
+            width = width,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            marginX = marginX,
+            startY = newApexY,
+            apexX = newApexX,
+            minValidBlockWidth = max(45, (width * 0.08f).roundToInt()),
+            excludedRect = excludedRect,
+            thresholdSq = translucentThresholdSq,
+            rejectDarkShadows = true
+        ).let { extended ->
+            if (extended.maxTopWidth >= baseBlock.maxTopWidth * 0.75f) extended else baseBlock
+        }
+    }
+
     fun computeDurationMs(normalizedDistancePx: Float, config: BotConfig): Long {
         val raw = when (config.formulaMode) {
             FormulaMode.LINEAR -> config.kFactor * normalizedDistancePx + config.offsetMs
@@ -366,13 +703,20 @@ object BlockVisionAnalyzer {
         return raw.roundToLong().coerceIn(config.minPressMs, config.maxPressMs)
     }
 
-    private fun isForegroundPixel(
+    private fun isExcluded(x: Int, absY: Int, excludedRect: Rect?): Boolean {
+        if (excludedRect == null) return false
+        return x in (excludedRect.left - 10)..(excludedRect.right + 10) &&
+            absY in (excludedRect.top - 10)..(excludedRect.bottom + 10)
+    }
+
+    private fun isValidBlockPixel(
         pixel: Int,
         leftBg: Int,
         rightBg: Int,
         x: Int,
         width: Int,
-        thresholdSq: Int
+        thresholdSq: Int,
+        rejectDarkShadows: Boolean
     ): Boolean {
         val t = x.toFloat() / width.toFloat()
         val bgR = (((leftBg shr 16) and 0xFF) * (1f - t) + ((rightBg shr 16) and 0xFF) * t).roundToInt()
@@ -383,17 +727,27 @@ object BlockVisionAnalyzer {
         val g = (pixel shr 8) and 0xFF
         val b = pixel and 0xFF
 
+        if (rejectDarkShadows) {
+            val pxLum = r * 3 + g * 6 + b
+            val bgLum = bgR * 3 + bgG * 6 + bgB
+            if (pxLum < bgLum - 40) return false
+        }
+
         val dr = r - bgR
         val dg = g - bgG
         val db = b - bgB
         return (dr * dr + dg * dg + db * db) > thresholdSq
     }
 
-    private fun colorDistSq(c1: Int, c2: Int): Int {
-        val dr = ((c1 shr 16) and 0xFF) - ((c2 shr 16) and 0xFF)
-        val dg = ((c1 shr 8) and 0xFF) - ((c2 shr 8) and 0xFF)
-        val db = (c1 and 0xFF) - (c2 and 0xFF)
-        return dr * dr + dg * dg + db * db
+    private fun isForegroundPixel(
+        pixel: Int,
+        leftBg: Int,
+        rightBg: Int,
+        x: Int,
+        width: Int,
+        thresholdSq: Int
+    ): Boolean {
+        return isValidBlockPixel(pixel, leftBg, rightBg, x, width, thresholdSq, rejectDarkShadows = false)
     }
 
     /**
@@ -403,9 +757,10 @@ object BlockVisionAnalyzer {
     fun generateSyntheticTestFrame(
         width: Int = 720,
         height: Int = 1280,
-        pawnColorRgb: Int = 0x383652,
+        pawnColorRgb: Int = 0x3E3353,
         targetBlockWidthPx: Float = 170f,
-        distanceFactor: Float = 0.65f
+        distanceFactor: Float = 0.65f,
+        halfTransparentTarget: Boolean = false
     ): Bitmap {
         val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
@@ -413,7 +768,7 @@ object BlockVisionAnalyzer {
         val bgPaint = Paint().apply {
             shader = LinearGradient(
                 0f, 0f, 0f, height.toFloat(),
-                intArrayOf(Color.rgb(214, 232, 245), Color.rgb(245, 224, 210)),
+                intArrayOf(Color.rgb(94, 92, 157), Color.rgb(141, 148, 201)),
                 null,
                 Shader.TileMode.CLAMP
             )
@@ -423,13 +778,17 @@ object BlockVisionAnalyzer {
         // Current platform (bottom-left isometric block)
         val curCx = width * 0.28f
         val curCy = height * 0.63f
-        drawIsometricBlock(canvas, curCx, curCy, 190f, 95f, Color.rgb(250, 250, 250), Color.rgb(212, 216, 225), Color.rgb(185, 190, 204))
+        drawIsometricBlock(canvas, curCx, curCy, 190f, 95f, Color.rgb(250, 250, 250), Color.rgb(30, 142, 149), Color.rgb(22, 118, 125))
 
         // Next target block (upper-right isometric block)
         val targetCx = curCx + (width * 0.48f * distanceFactor.coerceIn(0.35f, 1.0f))
         val targetCy = curCy - (height * 0.22f * distanceFactor.coerceIn(0.35f, 1.0f))
         val targetH = targetBlockWidthPx * 0.52f
-        drawIsometricBlock(canvas, targetCx, targetCy, targetBlockWidthPx, targetH, Color.rgb(255, 196, 92), Color.rgb(225, 162, 65), Color.rgb(190, 128, 45))
+        if (halfTransparentTarget) {
+            drawHalfTransparentBlock(canvas, targetCx, targetCy, targetBlockWidthPx, targetH)
+        } else {
+            drawIsometricBlock(canvas, targetCx, targetCy, targetBlockWidthPx, targetH, Color.rgb(255, 196, 92), Color.rgb(225, 162, 65), Color.rgb(190, 128, 45))
+        }
 
         // Pawn standing on current block
         val pawnPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -442,15 +801,63 @@ object BlockVisionAnalyzer {
         val bodyPath = Path().apply {
             moveTo(curCx - 14f, curCy - 12f)
             lineTo(curCx + 14f, curCy - 12f)
-            lineTo(curCx + 9f, curCy - 56f)
-            lineTo(curCx - 9f, curCy - 56f)
+            lineTo(curCx + 9f, curCy - 52f)
+            lineTo(curCx - 9f, curCy - 52f)
             close()
         }
         canvas.drawPath(bodyPath, pawnPaint)
         canvas.drawOval(curCx - 16f, curCy - 18f, curCx + 16f, curCy - 4f, pawnPaint)
-        canvas.drawCircle(curCx, curCy - 68f, 12f, pawnPaint)
+        val collarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(210, 175, 98) }
+        canvas.drawOval(curCx - 12f, curCy - 60f, curCx + 12f, curCy - 50f, collarPaint)
+        canvas.drawCircle(curCx, curCy - 72f, 12f, pawnPaint)
 
         return bmp
+    }
+
+    private fun drawHalfTransparentBlock(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        w: Float,
+        h: Float
+    ) {
+        val hw = w / 2f
+        val hh = h / 2f
+        val depth = h * 0.85f
+
+        val topGlass = Path().apply {
+            moveTo(cx, cy - hh)
+            lineTo(cx + hw, cy)
+            lineTo(cx, cy + hh)
+            lineTo(cx - hw, cy)
+            close()
+        }
+        val leftSide = Path().apply {
+            moveTo(cx - hw, cy)
+            lineTo(cx, cy + hh)
+            lineTo(cx, cy + hh + depth)
+            lineTo(cx - hw, cy + depth)
+            close()
+        }
+        val rightSide = Path().apply {
+            moveTo(cx + hw, cy)
+            lineTo(cx, cy + hh)
+            lineTo(cx, cy + hh + depth)
+            lineTo(cx + hw, cy + depth)
+            close()
+        }
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+        paint.color = Color.argb(230, 56, 189, 248)
+        canvas.drawPath(leftSide, paint)
+        paint.color = Color.argb(230, 14, 116, 144)
+        canvas.drawPath(rightSide, paint)
+        paint.color = Color.argb(72, 255, 255, 255)
+        canvas.drawPath(topGlass, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 3f
+        paint.color = Color.argb(145, 255, 255, 255)
+        canvas.drawPath(topGlass, paint)
     }
 
     private fun drawIsometricBlock(

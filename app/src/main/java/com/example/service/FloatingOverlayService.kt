@@ -8,6 +8,7 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.Rect
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
@@ -140,7 +141,21 @@ class FloatingOverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = dp(16)
-            y = dp(120)
+            y = dp(32)
+        }
+
+        fun publishBounds() {
+            val loc = IntArray(2)
+            container.getLocationOnScreen(loc)
+            if (container.width > 0 && container.height > 0) {
+                AutomationBridge.setOverlayBounds(
+                    Rect(loc[0], loc[1], loc[0] + container.width, loc[1] + container.height)
+                )
+            }
+        }
+
+        container.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            publishBounds()
         }
 
         var initialX = 0
@@ -161,6 +176,7 @@ class FloatingOverlayService : Service() {
                     params.x = initialX + (event.rawX - initialTouchX).roundToInt()
                     params.y = initialY + (event.rawY - initialTouchY).roundToInt()
                     windowManager?.updateViewLayout(container, params)
+                    publishBounds()
                     true
                 }
                 else -> false
