@@ -1,0 +1,6 @@
+{
+  "name": "JumpAssist",
+  "description": "Screen-reading vision analyzer and accessibility touch-duration calibrator for block-jumping mobile games.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
