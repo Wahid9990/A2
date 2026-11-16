@@ -155,8 +155,8 @@ object BlockVisionAnalyzer {
 
         // Step 2: Two-pass target block detection (opaque blocks + half-transparent/glass blocks)
         val minRunLength = max(6, (width * 0.014f).roundToInt())
-        val minValidBlockWidth = max(45, (width * 0.08f).roundToInt())
-        val minValidBlockHeight = max(18, (height * 0.015f).roundToInt())
+        val minValidBlockWidth = max(72, (width * 0.135f).roundToInt())
+        val minValidBlockHeight = max(24, (height * 0.020f).roundToInt())
         val translucentThreshold = max(12, config.bgDiffThreshold / 2)
         val translucentThresholdSq = translucentThreshold * translucentThreshold * 3
 
@@ -744,7 +744,7 @@ object BlockVisionAnalyzer {
             marginX = marginX,
             startY = newApexY,
             apexX = newApexX,
-            minValidBlockWidth = max(45, (width * 0.08f).roundToInt()),
+            minValidBlockWidth = max(72, (width * 0.135f).roundToInt()),
             excludedRect = excludedRect,
             thresholdSq = translucentThresholdSq,
             rejectDarkShadows = true

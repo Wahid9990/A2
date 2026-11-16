@@ -143,13 +143,20 @@ fun DashboardScreen(
                     PermissionStepCard(
                         icon = Icons.Filled.AccessibilityNew,
                         title = "Accessibility Touch Service",
-                        subtitle = if (permissions.accessibilityEnabled) {
-                            "Connected — GestureDescription dispatch ready"
-                        } else {
-                            "Required to perform timed press-and-hold jumps"
+                        subtitle = when {
+                            permissions.accessibilityEnabled ->
+                                "Connected — GestureDescription dispatch ready"
+                            permissions.accessibilitySettingOn ->
+                                "Unbound after app install/update. Open Settings → turn JumpAssist OFF, then ON again."
+                            else ->
+                                "Required to perform timed press-and-hold jumps"
                         },
                         isReady = permissions.accessibilityEnabled,
-                        actionLabel = if (permissions.accessibilityEnabled) "Settings" else "Enable",
+                        actionLabel = when {
+                            permissions.accessibilityEnabled -> "Settings"
+                            permissions.accessibilitySettingOn -> "Re-enable"
+                            else -> "Enable"
+                        },
                         testTag = "btn_enable_accessibility",
                         onAction = {
                             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -345,10 +352,13 @@ private fun HeroTelemetryBanner(
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = if (liveAnalysis != null && liveAnalysis.blockFound) {
-                            "Last Frame: D=${liveAnalysis.rawDistancePx.roundToInt()}px · Block W=${liveAnalysis.blockBounds?.widthPx?.roundToInt() ?: 0}px · Hold ${liveAnalysis.computedDurationMs}ms"
-                        } else {
-                            "Grant Accessibility + Screen Capture, then switch to your jumping game."
+                        text = when {
+                            liveAnalysis != null && liveAnalysis.blockFound ->
+                                "Last Frame: D=${liveAnalysis.rawDistancePx.roundToInt()}px · Block W=${liveAnalysis.blockBounds?.widthPx?.roundToInt() ?: 0}px · Hold ${liveAnalysis.computedDurationMs}ms"
+                            !permissions.accessibilityEnabled && permissions.accessibilitySettingOn ->
+                                "Accessibility unbound after install — tap Re-enable and toggle JumpAssist OFF → ON."
+                            else ->
+                                "Grant Accessibility + Screen Capture, then switch to your jumping game."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant

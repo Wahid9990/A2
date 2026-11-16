@@ -236,6 +236,11 @@ class ScreenCaptureService : Service() {
     }
 
     private suspend fun handleManualCorrection(isShort: Boolean) {
+        if (!AutomationBridge.isAccessibilityConnected.value) {
+            AutomationBridge.updateTrainingBanner("Enable Accessibility Service first!")
+            AutomationBridge.appendLog("Ignored correction: Accessibility Service is not bound yet", isError = true)
+            return
+        }
         val cfg = AutomationBridge.currentConfig.value
         val latest = AutomationBridge.trainingRecords.value.firstOrNull()
         val (updatedCfg, updatedRec, msg) = JumpTrainer.applyManualFeedback(cfg, latest, isShort)
@@ -288,11 +293,18 @@ class ScreenCaptureService : Service() {
         AutomationBridge.updateAnalysis(stableResult)
 
         if (!stableResult.pawnFound || !stableResult.blockFound) {
+            AutomationBridge.updateTrainingBanner("Standby (waiting for game board...)")
             AutomationBridge.appendLog(
                 "${stableResult.statusMessage} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
                 isError = true
             )
             return 550L
+        }
+
+        if (!AutomationBridge.isAccessibilityConnected.value) {
+            AutomationBridge.updateTrainingBanner("⚠ Enable Accessibility Touch!")
+            AutomationBridge.appendLog("Waiting: toggle Accessibility Service OFF→ON in Settings", isError = true)
+            return 1200L
         }
 
         val tapX = (screenWidth * config.tapXFraction).coerceIn(40f, screenWidth - 40f)
@@ -411,12 +423,10 @@ class ScreenCaptureService : Service() {
             AutomationBridge.appendLog("Result [${outcome.shortLabel} $ratioSummary] ($trainNote)")
         }
 
-        // If Game Over detected after auto-loop jump, pause auto-loop cleanly instead of blindly spamming Restart UI
+        // Keep Auto-Loop ARMED across Game Over so user just taps Play Again and self-training continues!
         if (outcome == JumpOutcome.OUT_SHORT || outcome == JumpOutcome.OUT_OVERSHOOT || outcome == JumpOutcome.OUT_UNKNOWN) {
-            if (AutomationBridge.isAutoLoopActive.value) {
-                AutomationBridge.setAutoLoopActive(false)
-                AutomationBridge.appendLog("Auto-paused on Game Over ($outcome) — ready to Copy Data", isError = true)
-            }
+            AutomationBridge.updateTrainingBanner("OUT ($ratioSummary) · Armed for Replay")
+            AutomationBridge.appendLog("Round ended ($outcome) — Auto stays armed; tap Replay in game to continue")
         }
 
         return 120L

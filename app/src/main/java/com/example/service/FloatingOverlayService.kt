@@ -11,6 +11,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -18,10 +19,12 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -113,13 +116,19 @@ class FloatingOverlayService : Service() {
 
         val stepBtn = createPillButton("Step", Color.rgb(29, 45, 70), Color.rgb(241, 245, 249), dp(8)).apply {
             setOnClickListener {
-                AutomationBridge.requestSingleStep()
+                if (ensureServicesReadyForTouch()) {
+                    AutomationBridge.requestSingleStep()
+                }
             }
         }
 
         autoButton = createPillButton("Auto", Color.rgb(16, 185, 129), Color.rgb(2, 38, 25), dp(8)).apply {
             setOnClickListener {
-                AutomationBridge.toggleAutoLoop()
+                if (AutomationBridge.isAutoLoopActive.value) {
+                    AutomationBridge.setAutoLoopActive(false)
+                } else if (ensureServicesReadyForTouch()) {
+                    AutomationBridge.setAutoLoopActive(true)
+                }
             }
         }
 
@@ -140,7 +149,9 @@ class FloatingOverlayService : Service() {
 
         val shortBtn = createSmallFeedbackButton("◀ Too Short", Color.rgb(51, 35, 12), Color.rgb(251, 191, 36), dp(6)).apply {
             setOnClickListener {
-                AutomationBridge.requestManualFeedback(isShort = true)
+                if (ensureServicesReadyForTouch()) {
+                    AutomationBridge.requestManualFeedback(isShort = true)
+                }
             }
         }
 
@@ -150,7 +161,9 @@ class FloatingOverlayService : Service() {
 
         val longBtn = createSmallFeedbackButton("Too Far ▶", Color.rgb(66, 20, 32), Color.rgb(251, 113, 133), dp(6)).apply {
             setOnClickListener {
-                AutomationBridge.requestManualFeedback(isShort = false)
+                if (ensureServicesReadyForTouch()) {
+                    AutomationBridge.requestManualFeedback(isShort = false)
+                }
             }
         }
 
@@ -279,15 +292,30 @@ class FloatingOverlayService : Service() {
         }
 
         serviceScope.launch {
-            AutomationBridge.lastTrainingBanner.collect { banner ->
-                val cfg = AutomationBridge.currentConfig.value
-                trainStatusText.text = banner ?: String.format(
-                    Locale.US,
-                    "Train:%s · k=%.2f b=%.0f",
-                    if (cfg.autoTrainEnabled) "ON" else "OFF",
-                    cfg.kFactor,
-                    cfg.offsetMs
-                )
+            combine(
+                AutomationBridge.lastTrainingBanner,
+                AutomationBridge.isAccessibilityConnected,
+                AutomationBridge.isScreenCaptureActive
+            ) { banner, accessibilityConnected, captureActive ->
+                Triple(banner, accessibilityConnected, captureActive)
+            }.collect { (banner, accessibilityConnected, captureActive) ->
+                if (!accessibilityConnected) {
+                    trainStatusText.text = "⚠ Touch OFF — Tap Auto to Re-enable"
+                    trainStatusText.setTextColor(Color.rgb(251, 191, 36))
+                } else if (!captureActive) {
+                    trainStatusText.text = "⚠ Capture OFF — Tap Auto to Grant"
+                    trainStatusText.setTextColor(Color.rgb(251, 191, 36))
+                } else {
+                    val cfg = AutomationBridge.currentConfig.value
+                    trainStatusText.text = banner ?: String.format(
+                        Locale.US,
+                        "Train:%s · k=%.2f b=%.0f",
+                        if (cfg.autoTrainEnabled) "ON" else "OFF",
+                        cfg.kFactor,
+                        cfg.offsetMs
+                    )
+                    trainStatusText.setTextColor(Color.rgb(16, 185, 129))
+                }
             }
         }
 
@@ -305,6 +333,47 @@ class FloatingOverlayService : Service() {
                 }
             }
         }
+    }
+
+    private fun ensureServicesReadyForTouch(): Boolean {
+        if (!AutomationBridge.isAccessibilityConnected.value) {
+            Toast.makeText(
+                this,
+                "Turn JumpAssist Accessibility OFF → ON to enable touch!",
+                Toast.LENGTH_LONG
+            ).show()
+            AutomationBridge.appendLog(
+                "HUD: Accessibility unbound — opening Settings (toggle OFF → ON)",
+                isError = true
+            )
+            runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                )
+            }
+            return false
+        }
+        if (!AutomationBridge.isScreenCaptureActive.value) {
+            Toast.makeText(
+                this,
+                "Grant Screen Capture in JumpAssist app first!",
+                Toast.LENGTH_LONG
+            ).show()
+            AutomationBridge.appendLog(
+                "HUD: Screen Capture inactive — opening JumpAssist",
+                isError = true
+            )
+            runCatching {
+                packageManager.getLaunchIntentForPackage(packageName)?.let { intent ->
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    startActivity(intent)
+                }
+            }
+            return false
+        }
+        return true
     }
 
     override fun onDestroy() {

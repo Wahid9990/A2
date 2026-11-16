@@ -34,6 +34,7 @@ import kotlin.math.roundToInt
 
 data class PermissionReadiness(
     val accessibilityEnabled: Boolean = false,
+    val accessibilitySettingOn: Boolean = false,
     val overlayGranted: Boolean = false,
     val notificationsGranted: Boolean = true,
     val captureRunning: Boolean = false,
@@ -102,7 +103,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshPermissions() {
         val ctx = getApplication<Application>()
-        val accessibility = AutomationBridge.isAccessibilityConnected.value || isAccessibilityServiceEnabledInSettings(ctx)
+        val accessibilityBound = AutomationBridge.isAccessibilityConnected.value
+        val accessibilityInSettings = isAccessibilityServiceEnabledInSettings(ctx)
         val overlay = Settings.canDrawOverlays(ctx)
         val notifications = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
@@ -111,7 +113,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         _permissions.value = PermissionReadiness(
-            accessibilityEnabled = accessibility,
+            accessibilityEnabled = accessibilityBound,
+            accessibilitySettingOn = accessibilityInSettings,
             overlayGranted = overlay,
             notificationsGranted = notifications,
             captureRunning = AutomationBridge.isScreenCaptureActive.value,
@@ -259,6 +262,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun applyManualFeedback(isShort: Boolean) {
         if (AutomationBridge.isScreenCaptureActive.value) {
             AutomationBridge.requestManualFeedback(isShort)
+            return
+        }
+        if (!AutomationBridge.isAccessibilityConnected.value && AutomationBridge.trainingRecords.value.isEmpty()) {
+            AutomationBridge.appendLog("Ignored correction: bind Accessibility Service and run a jump first", isError = true)
             return
         }
         viewModelScope.launch {
