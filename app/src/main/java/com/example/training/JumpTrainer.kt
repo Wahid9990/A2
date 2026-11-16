@@ -18,7 +18,7 @@ object JumpTrainer {
     private const val MAX_K = 2.15f
     private const val MIN_B = -15f
     private const val MAX_B = 75f
-    private const val ANCHOR_K = 1.48f
+    private const val ANCHOR_K = 1.38f
     private const val MAX_AUTO_K_STEP = 0.055f
 
     /**

@@ -194,7 +194,7 @@ object BlockVisionAnalyzer {
                 translucentThresholdSq = translucentThresholdSq
             )
         } else {
-            // Pass 2: Translucent / chromatic low-contrast block fallback (rejecting neutral drop shadows)
+            // Pass 2: Translucent / chromatic low-contrast block fallback (rejecting neutral drop shadows & smooth sky glow)
             block = scanForTargetBlock(
                 pixels = pixels,
                 width = width,
@@ -211,12 +211,13 @@ object BlockVisionAnalyzer {
                 minRunLength = minRunLength,
                 minValidBlockWidth = minValidBlockWidth,
                 minValidBlockHeight = minValidBlockHeight,
-                rejectDarkShadows = true
+                rejectDarkShadows = true,
+                requireSharpBoundary = true
             )
         }
 
         if (block == null) {
-            // Pass 3: Background-matching subtle cube fallback (verifies internal 3D shading contrast)
+            // Pass 3: Background-matching subtle cube fallback (verifies internal 3D shading contrast & sharp edges)
             block = scanForTargetBlock(
                 pixels = pixels,
                 width = width,
@@ -234,7 +235,8 @@ object BlockVisionAnalyzer {
                 minValidBlockWidth = minValidBlockWidth,
                 minValidBlockHeight = max(minValidBlockHeight, (height * 0.028f).roundToInt()),
                 rejectDarkShadows = true,
-                requireInternalContrast = true
+                requireInternalContrast = true,
+                requireSharpBoundary = true
             )
         }
 
@@ -541,11 +543,12 @@ object BlockVisionAnalyzer {
         minValidBlockWidth: Int,
         minValidBlockHeight: Int,
         rejectDarkShadows: Boolean,
-        requireInternalContrast: Boolean = false
+        requireInternalContrast: Boolean = false,
+        requireSharpBoundary: Boolean = false
     ): BlockTrace? {
         val maxBlockScanY = (pawnBaseY - roiTop - 10).roundToInt().coerceIn(0, roiHeight - 1)
-        val maxValidBlockWidth = (width * 0.415f).roundToInt()
-        val minVerticalClimb = width * 0.14f
+        val maxValidBlockWidth = (width * 0.45f).roundToInt()
+        val minVerticalClimb = width * 0.075f
 
         var bestBlock: BlockTrace? = null
         var bestScore = Float.NEGATIVE_INFINITY
@@ -628,20 +631,28 @@ object BlockVisionAnalyzer {
                     roiHeight = roiHeight,
                     traced = traced
                 )
+                val sharpBoundaryOk = (!requireSharpBoundary && !requireInternalContrast) || hasSharpBoundaryEdge(
+                    pixels = pixels,
+                    width = width,
+                    roiHeight = roiHeight,
+                    traced = traced,
+                    marginX = marginX
+                )
 
                 val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
                     cHeight >= minValidBlockHeight &&
-                    distFromPawn >= width * 0.18f &&
+                    distFromPawn >= width * 0.15f &&
                     !overlapsPawnBase &&
                     dyAbs >= minVerticalClimb &&
                     dxAbs >= dyAbs * 0.25f &&
-                    contrastOk
+                    contrastOk &&
+                    sharpBoundaryOk
 
                 if (validGeometry) {
                     // Prefer the true next block (closest diagonal platform above the pawn rather than far 2nd blocks)
                     val isoRatio = dxAbs / dyAbs.coerceAtLeast(1f)
                     val isoBonus = if (isoRatio in 0.35f..1.85f) 400f else 0f
-                    val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.39f).roundToInt()) 150f else 0f
+                    val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.42f).roundToInt()) 150f else 0f
                     val score = isoBonus + sizeBonus - distFromPawn
                     if (score > bestScore) {
                         bestScore = score
@@ -654,6 +665,13 @@ object BlockVisionAnalyzer {
             ry++
         }
         return bestBlock
+    }
+
+    private fun colorDistSq(a: Int, b: Int): Int {
+        val dr = ((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)
+        val dg = ((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)
+        val db = (a and 0xFF) - (b and 0xFF)
+        return dr * dr + dg * dg + db * db
     }
 
     private fun hasInternalBlockContrast(
@@ -669,18 +687,42 @@ object BlockVisionAnalyzer {
         val leftSidePx = pixels[sideSampleY * width + (cx - 12).coerceAtLeast(0)]
         val rightSidePx = pixels[sideSampleY * width + (cx + 12).coerceAtMost(width - 1)]
 
-        fun colorDistSq(a: Int, b: Int): Int {
-            val dr = ((a shr 16) and 0xFF) - ((b shr 16) and 0xFF)
-            val dg = ((a shr 8) and 0xFF) - ((b shr 8) and 0xFF)
-            val db = (a and 0xFF) - (b and 0xFF)
-            return dr * dr + dg * dg + db * db
-        }
-        // Real 3D blocks have top vs side or left-wall vs right-wall shading contrast, unlike flat sky noise
+        // Real 3D blocks have strong top-vs-side or left-vs-right face contrast, unlike vertical sky gradients
         return maxOf(
             colorDistSq(topPx, leftSidePx),
             colorDistSq(topPx, rightSidePx),
             colorDistSq(leftSidePx, rightSidePx)
-        ) >= 180
+        ) >= 300
+    }
+
+    private fun hasSharpBoundaryEdge(
+        pixels: IntArray,
+        width: Int,
+        roiHeight: Int,
+        traced: BlockTrace,
+        marginX: Int
+    ): Boolean {
+        val leftX = traced.widestLeftX.roundToInt()
+        val rightX = traced.widestRightX.roundToInt()
+        val outLeftX = (leftX - 10).coerceIn(marginX / 2, width - 1)
+        val inLeftX = (leftX + 10).coerceIn(0, width - 1)
+        val outRightX = (rightX + 10).coerceIn(0, width - 1 - marginX / 2)
+        val inRightX = (rightX - 10).coerceIn(0, width - 1)
+
+        val rowA = traced.widestRowY.coerceIn(0, roiHeight - 1)
+        val rowB = (traced.widestRowY + 8).coerceIn(0, roiHeight - 1)
+
+        val leftJump = max(
+            colorDistSq(pixels[rowA * width + inLeftX], pixels[rowA * width + outLeftX]),
+            colorDistSq(pixels[rowB * width + inLeftX], pixels[rowB * width + outLeftX])
+        )
+        val rightJump = max(
+            colorDistSq(pixels[rowA * width + inRightX], pixels[rowA * width + outRightX]),
+            colorDistSq(pixels[rowB * width + inRightX], pixels[rowB * width + outRightX])
+        )
+
+        // Smooth radial sky glow changes <= 50 across 20px; real block borders jump sharply
+        return max(leftJump, rightJump) >= 240 && min(leftJump, rightJump) >= 110
     }
 
     private fun traceBlockDownward(
@@ -704,7 +746,7 @@ object BlockVisionAnalyzer {
         var plateauRows = 0
         val maxTraceY = min(roiHeight - 1, startY + (width * 0.18f).roundToInt())
         val maxWideningY = startY + (width * 0.145f).roundToInt()
-        val maxReasonableWidth = (width * 0.415f).roundToInt()
+        val maxReasonableWidth = (width * 0.45f).roundToInt()
         val maxSpikeJump = max(24, (width * 0.06f).roundToInt())
         var traceCenterX = apexX.roundToInt().coerceIn(marginX, width - marginX - 1)
 

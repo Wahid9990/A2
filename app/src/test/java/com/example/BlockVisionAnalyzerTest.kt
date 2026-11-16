@@ -184,4 +184,87 @@ class BlockVisionAnalyzerTest {
         assertTrue("Measured block width should be >= 160px, got ${result.blockBounds?.widthPx}", (result.blockBounds?.widthPx ?: 0f) >= 160f)
         assertTrue("Block top color telemetry should be sampled", diag.blockTopHex.startsWith("#"))
     }
+
+    @Test
+    fun `ignores radial center sky glow #816ACF on #7D65C1 sky and locks onto close wide block`() {
+        val config = BotConfig(bgDiffThreshold = 38, roiTopFraction = 0.28f, roiBottomFraction = 0.72f)
+        val w = 720
+        val h = 1600
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+
+        // Draw #4F448A -> #7D65C1 gradient sky matching real vivo telemetry
+        val skyPaint = android.graphics.Paint().apply {
+            shader = android.graphics.LinearGradient(
+                0f, 448f, 0f, 1152f,
+                intArrayOf(android.graphics.Color.rgb(0x4F, 0x44, 0x8A), android.graphics.Color.rgb(0x7D, 0x65, 0xC1)),
+                null,
+                android.graphics.Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), skyPaint)
+
+        // Draw smooth radial center sky glow (#816ACF -> transparent) around (360, 690)
+        val glowPaint = android.graphics.Paint().apply {
+            shader = android.graphics.RadialGradient(
+                360f, 690f, 220f,
+                intArrayOf(android.graphics.Color.argb(220, 0x84, 0x6C, 0xD2), android.graphics.Color.argb(0, 0x7D, 0x65, 0xC1)),
+                null,
+                android.graphics.Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawCircle(360f, 690f, 220f, glowPaint)
+
+        // Draw pawn at (218, 954) so sky glow at (360, 690) is right in the false target zone
+        val pawnPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(0x3E, 0x33, 0x53)
+        }
+        val px = 218f
+        val py = 954f
+        val bodyPath = android.graphics.Path().apply {
+            moveTo(px - 14f, py); lineTo(px + 14f, py); lineTo(px + 9f, py - 46f); lineTo(px - 9f, py - 46f); close()
+        }
+        canvas.drawPath(bodyPath, pawnPaint)
+        canvas.drawOval(px - 16f, py - 10f, px + 16f, py + 4f, pawnPaint)
+        val collarPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(210, 175, 98)
+        }
+        canvas.drawOval(px - 12f, py - 56f, px + 12f, py - 46f, collarPaint)
+        canvas.drawCircle(px, py - 70f, 12f, pawnPaint)
+
+        // Verify empty sky glow frame does NOT falsely lock onto (360, 690)
+        val emptySkyResult = BlockVisionAnalyzer.analyze(bmp, config)
+        assertTrue("Pawn should be detected on radial glow frame", emptySkyResult.pawnFound)
+        assertTrue("Smooth radial sky glow #816ACF must NOT be detected as a block, got ${emptySkyResult.blockBounds}", !emptySkyResult.blockFound)
+
+        // Now paint a wide (308px) & vertically close (dy = 82px) real chest block at (500, 872)
+        val bx = 500f
+        val by = 872f
+        val hw = 154f
+        val hh = 76f
+        val depth = 64f
+        val blockPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        val topPath = android.graphics.Path().apply {
+            moveTo(bx, by - hh); lineTo(bx + hw, by); lineTo(bx, by + hh); lineTo(bx - hw, by); close()
+        }
+        val leftPath = android.graphics.Path().apply {
+            moveTo(bx - hw, by); lineTo(bx, by + hh); lineTo(bx, by + hh + depth); lineTo(bx - hw, by + depth); close()
+        }
+        val rightPath = android.graphics.Path().apply {
+            moveTo(bx + hw, by); lineTo(bx, by + hh); lineTo(bx, by + hh + depth); lineTo(bx + hw, by + depth); close()
+        }
+        blockPaint.color = android.graphics.Color.rgb(185, 118, 56); canvas.drawPath(leftPath, blockPaint)
+        blockPaint.color = android.graphics.Color.rgb(155, 92, 42); canvas.drawPath(rightPath, blockPaint)
+        blockPaint.color = android.graphics.Color.rgb(235, 194, 88); canvas.drawPath(topPath, blockPaint)
+
+        val closeWideResult = BlockVisionAnalyzer.analyze(bmp, config)
+        bmp.recycle()
+
+        assertTrue("Close wide chest block (w=308, dy=82) should be detected", closeWideResult.blockFound)
+        val lockedCenter = closeWideResult.blockBounds?.center
+        assertTrue(
+            "Analyzer should lock onto real block near (500, 872) rather than sky glow (360, 690); got $lockedCenter",
+            lockedCenter != null && kotlin.math.abs(lockedCenter.x - 500f) < 35f && kotlin.math.abs(lockedCenter.y - 872f) < 35f
+        )
+    }
 }
