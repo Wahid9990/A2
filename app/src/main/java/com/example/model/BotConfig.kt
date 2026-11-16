@@ -17,7 +17,7 @@ data class BotConfig(
     val roiBottomFraction: Float = 0.72f,
     val tapXFraction: Float = 0.50f,
     val tapYFraction: Float = 0.84f,
-    val jumpCooldownMs: Long = 1800L,
+    val jumpCooldownMs: Long = 1150L,
     val minPressMs: Long = 90L,
     val maxPressMs: Long = 1600L,
     val autoTrainEnabled: Boolean = true

@@ -44,7 +44,8 @@ class BotPreferencesRepository(private val context: Context) {
     }
 
     private companion object {
-        const val CURRENT_CALIB_VERSION = 7
+        const val MIN_VALID_CALIB_VERSION = 7
+        const val CURRENT_CALIB_VERSION = 8
         const val MAX_STORED_RECORDS = 60
     }
 
@@ -58,11 +59,17 @@ class BotPreferencesRepository(private val context: Context) {
     }
 
     private fun readConfigFromPrefs(prefs: Preferences): BotConfig {
-        val migrated = (prefs[Keys.CALIB_VERSION] ?: 1) >= CURRENT_CALIB_VERSION
+        val storedVersion = prefs[Keys.CALIB_VERSION] ?: 1
         val defaults = BotConfig()
-        if (!migrated) return defaults
+        if (storedVersion < MIN_VALID_CALIB_VERSION) return defaults
         val modeName = prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name
         val mode = runCatching { FormulaMode.valueOf(modeName) }.getOrDefault(FormulaMode.LINEAR)
+        val rawCooldown = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs
+        val migratedCooldown = if (storedVersion < CURRENT_CALIB_VERSION && rawCooldown >= 1500L) {
+            defaults.jumpCooldownMs
+        } else {
+            rawCooldown
+        }
         return BotConfig(
             formulaMode = mode,
             kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
@@ -75,7 +82,7 @@ class BotPreferencesRepository(private val context: Context) {
             roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: defaults.roiBottomFraction,
             tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: defaults.tapXFraction,
             tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: defaults.tapYFraction,
-            jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs,
+            jumpCooldownMs = migratedCooldown,
             minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
             maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs,
             autoTrainEnabled = prefs[Keys.AUTO_TRAIN_ENABLED] ?: defaults.autoTrainEnabled

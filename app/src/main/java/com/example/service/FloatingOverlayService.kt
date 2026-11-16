@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
+import android.graphics.Outline
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.Typeface
@@ -15,11 +16,16 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
+import android.view.ViewOutlineProvider
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.example.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,12 +33,17 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class FloatingOverlayService : Service() {
 
     private var windowManager: WindowManager? = null
-    private var rootView: LinearLayout? = null
+    private var rootView: FrameLayout? = null
+    private lateinit var iconBubbleView: FrameLayout
+    private lateinit var expandedHudView: LinearLayout
+    private lateinit var bubbleRingDrawable: GradientDrawable
+    private lateinit var bubbleDotDrawable: GradientDrawable
     private lateinit var telemetryText: TextView
     private lateinit var trainStatusText: TextView
     private lateinit var autoButton: Button
@@ -46,7 +57,7 @@ class FloatingOverlayService : Service() {
         createOverlayHud()
         observeBridgeState()
         AutomationBridge.setOverlayActive(true)
-        AutomationBridge.appendLog("Floating HUD overlay launched")
+        AutomationBridge.appendLog("Floating icon badge launched (tap icon to open HUD)")
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -54,8 +65,62 @@ class FloatingOverlayService : Service() {
         val density = resources.displayMetrics.density
         fun dp(value: Int): Int = (value * density).roundToInt()
 
+        val rootFrame = FrameLayout(this)
+
+        // 1. Collapsed Floating Icon Bubble (52dp circular badge)
+        bubbleRingDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.argb(242, 11, 19, 32))
+            setStroke(dp(3), Color.rgb(34, 211, 238))
+        }
+
+        val bubbleSize = dp(52)
+        iconBubbleView = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(bubbleSize, bubbleSize)
+            background = bubbleRingDrawable
+            elevation = dp(6).toFloat()
+            visibility = View.VISIBLE
+        }
+
+        val iconImage = ImageView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply {
+                val inset = dp(5)
+                setMargins(inset, inset, inset, inset)
+            }
+            setImageResource(R.drawable.ic_launcher_art)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            contentDescription = "Open JumpAssist HUD"
+            outlineProvider = object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                    outline.setOval(0, 0, view.width, view.height)
+                }
+            }
+            clipToOutline = true
+        }
+
+        bubbleDotDrawable = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.rgb(16, 185, 129))
+            setStroke(dp(2), Color.rgb(11, 19, 32))
+        }
+
+        val statusDot = View(this).apply {
+            val dotSize = dp(13)
+            layoutParams = FrameLayout.LayoutParams(dotSize, dotSize, Gravity.BOTTOM or Gravity.END).apply {
+                setMargins(0, 0, dp(1), dp(1))
+            }
+            background = bubbleDotDrawable
+        }
+
+        iconBubbleView.addView(iconImage)
+        iconBubbleView.addView(statusDot)
+
+        // 2. Expanded JumpAssist HUD Popup
         val containerBg = GradientDrawable().apply {
-            setColor(Color.argb(235, 11, 19, 32))
+            setColor(Color.argb(238, 11, 19, 32))
             cornerRadius = dp(18).toFloat()
             setStroke(dp(1), Color.rgb(34, 211, 238))
         }
@@ -64,6 +129,7 @@ class FloatingOverlayService : Service() {
             orientation = LinearLayout.VERTICAL
             background = containerBg
             setPadding(dp(12), dp(10), dp(12), dp(10))
+            visibility = View.GONE
         }
 
         val headerRow = LinearLayout(this).apply {
@@ -79,11 +145,28 @@ class FloatingOverlayService : Service() {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
 
+        lateinit var publishBounds: () -> Unit
+
+        val minimizeBtn = TextView(this).apply {
+            text = "—"
+            setTextColor(Color.rgb(148, 163, 184))
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            contentDescription = "Minimize to floating icon"
+            setPadding(dp(10), dp(2), dp(10), dp(2))
+            setOnClickListener {
+                container.visibility = View.GONE
+                iconBubbleView.visibility = View.VISIBLE
+                rootFrame.post { publishBounds() }
+            }
+        }
+
         val closeBtn = TextView(this).apply {
             text = "✕"
             setTextColor(Color.rgb(244, 63, 94))
             textSize = 14f
             typeface = Typeface.DEFAULT_BOLD
+            contentDescription = "Close JumpAssist HUD"
             setPadding(dp(8), dp(2), dp(4), dp(2))
             setOnClickListener {
                 stopSelf()
@@ -91,6 +174,7 @@ class FloatingOverlayService : Service() {
         }
 
         headerRow.addView(titleView)
+        headerRow.addView(minimizeBtn)
         headerRow.addView(closeBtn)
 
         telemetryText = TextView(this).apply {
@@ -177,6 +261,10 @@ class FloatingOverlayService : Service() {
         container.addView(buttonRow)
         container.addView(trainRow)
 
+        expandedHudView = container
+        rootFrame.addView(iconBubbleView)
+        rootFrame.addView(container)
+
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         } else {
@@ -192,22 +280,67 @@ class FloatingOverlayService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = dp(16)
-            y = dp(32)
+            x = dp(14)
+            y = dp(48)
         }
 
-        fun publishBounds() {
+        publishBounds = {
+            val activeView: View = if (iconBubbleView.visibility == View.VISIBLE) iconBubbleView else container
             val loc = IntArray(2)
-            container.getLocationOnScreen(loc)
-            if (container.width > 0 && container.height > 0) {
+            activeView.getLocationOnScreen(loc)
+            if (activeView.width > 0 && activeView.height > 0) {
                 AutomationBridge.setOverlayBounds(
-                    Rect(loc[0], loc[1], loc[0] + container.width, loc[1] + container.height)
+                    Rect(loc[0], loc[1], loc[0] + activeView.width, loc[1] + activeView.height)
                 )
             }
         }
 
-        container.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        rootFrame.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
             publishBounds()
+        }
+
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+
+        var bubbleInitialX = 0
+        var bubbleInitialY = 0
+        var bubbleTouchX = 0f
+        var bubbleTouchY = 0f
+        var bubbleDragged = false
+
+        iconBubbleView.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    bubbleInitialX = params.x
+                    bubbleInitialY = params.y
+                    bubbleTouchX = event.rawX
+                    bubbleTouchY = event.rawY
+                    bubbleDragged = false
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (event.rawX - bubbleTouchX).roundToInt()
+                    val dy = (event.rawY - bubbleTouchY).roundToInt()
+                    if (!bubbleDragged && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
+                        bubbleDragged = true
+                    }
+                    if (bubbleDragged) {
+                        params.x = bubbleInitialX + dx
+                        params.y = bubbleInitialY + dy
+                        windowManager?.updateViewLayout(rootFrame, params)
+                        publishBounds()
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!bubbleDragged) {
+                        iconBubbleView.visibility = View.GONE
+                        container.visibility = View.VISIBLE
+                        rootFrame.post { publishBounds() }
+                    }
+                    true
+                }
+                else -> false
+            }
         }
 
         var initialX = 0
@@ -227,7 +360,7 @@ class FloatingOverlayService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     params.x = initialX + (event.rawX - initialTouchX).roundToInt()
                     params.y = initialY + (event.rawY - initialTouchY).roundToInt()
-                    windowManager?.updateViewLayout(container, params)
+                    windowManager?.updateViewLayout(rootFrame, params)
                     publishBounds()
                     true
                 }
@@ -235,8 +368,8 @@ class FloatingOverlayService : Service() {
             }
         }
 
-        rootView = container
-        windowManager?.addView(container, params)
+        rootView = rootFrame
+        windowManager?.addView(rootFrame, params)
     }
 
     private fun createPillButton(label: String, bgColor: Int, textColor: Int, horizontalPad: Int): Button {
@@ -276,6 +409,8 @@ class FloatingOverlayService : Service() {
     }
 
     private fun observeBridgeState() {
+        val strokePx = (3 * resources.displayMetrics.density).roundToInt()
+
         serviceScope.launch {
             AutomationBridge.lastAnalysis.collect { analysis ->
                 if (analysis != null) {
@@ -295,16 +430,21 @@ class FloatingOverlayService : Service() {
             combine(
                 AutomationBridge.lastTrainingBanner,
                 AutomationBridge.isAccessibilityConnected,
-                AutomationBridge.isScreenCaptureActive
-            ) { banner, accessibilityConnected, captureActive ->
-                Triple(banner, accessibilityConnected, captureActive)
-            }.collect { (banner, accessibilityConnected, captureActive) ->
+                AutomationBridge.isScreenCaptureActive,
+                AutomationBridge.isAutoLoopActive
+            ) { banner, accessibilityConnected, captureActive, autoActive ->
+                Quad(banner, accessibilityConnected, captureActive, autoActive)
+            }.collect { (banner, accessibilityConnected, captureActive, autoActive) ->
                 if (!accessibilityConnected) {
                     trainStatusText.text = "⚠ Touch OFF — Tap Auto to Re-enable"
                     trainStatusText.setTextColor(Color.rgb(251, 191, 36))
+                    bubbleRingDrawable.setStroke(strokePx, Color.rgb(251, 191, 36))
+                    bubbleDotDrawable.setColor(Color.rgb(251, 191, 36))
                 } else if (!captureActive) {
                     trainStatusText.text = "⚠ Capture OFF — Tap Auto to Grant"
                     trainStatusText.setTextColor(Color.rgb(251, 191, 36))
+                    bubbleRingDrawable.setStroke(strokePx, Color.rgb(251, 191, 36))
+                    bubbleDotDrawable.setColor(Color.rgb(251, 191, 36))
                 } else {
                     val cfg = AutomationBridge.currentConfig.value
                     trainStatusText.text = banner ?: String.format(
@@ -315,6 +455,13 @@ class FloatingOverlayService : Service() {
                         cfg.offsetMs
                     )
                     trainStatusText.setTextColor(Color.rgb(16, 185, 129))
+                    if (autoActive) {
+                        bubbleRingDrawable.setStroke(strokePx, Color.rgb(245, 158, 11))
+                        bubbleDotDrawable.setColor(Color.rgb(245, 158, 11))
+                    } else {
+                        bubbleRingDrawable.setStroke(strokePx, Color.rgb(34, 211, 238))
+                        bubbleDotDrawable.setColor(Color.rgb(16, 185, 129))
+                    }
                 }
             }
         }
@@ -334,6 +481,8 @@ class FloatingOverlayService : Service() {
             }
         }
     }
+
+    private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
     private fun ensureServicesReadyForTouch(): Boolean {
         if (!AutomationBridge.isAccessibilityConnected.value) {
@@ -382,6 +531,7 @@ class FloatingOverlayService : Service() {
             runCatching { windowManager?.removeView(view) }
         }
         rootView = null
+        AutomationBridge.setOverlayBounds(null)
         AutomationBridge.setOverlayActive(false)
         AutomationBridge.appendLog("Floating HUD overlay closed")
         super.onDestroy()

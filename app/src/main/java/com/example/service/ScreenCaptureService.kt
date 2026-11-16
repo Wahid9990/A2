@@ -269,15 +269,19 @@ class ScreenCaptureService : Service() {
             overlayRect = overlayRect,
             allowCached = true,
             touchdownSnapshot = lastTouchdownSnapshot
-        ) ?: return 300L
+        ) ?: return 220L
 
         val startManualEpoch = manualConfigEpoch
 
         if (requireStability && AutomationBridge.isAutoLoopActive.value) {
             var checks = 0
             var lockedStable = false
-            while (checks < 8 && AutomationBridge.isAutoLoopActive.value) {
-                delay(150L)
+            var missingBoardStreak = if (!stableResult.pawnFound || !stableResult.blockFound) 1 else 0
+            var lastDistDrift = Float.MAX_VALUE
+            var lastPawnDrift = Float.MAX_VALUE
+
+            while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
+                delay(90L)
                 val nextPair = analyzeLatestFrameWithDiag(
                     config = config,
                     overlayRect = overlayRect,
@@ -289,16 +293,32 @@ class ScreenCaptureService : Service() {
                 val nextW = nextResult?.blockBounds?.widthPx ?: 0f
                 if (nextResult != null &&
                     stableResult.pawnFound && nextResult.pawnFound &&
-                    stableResult.blockFound && nextResult.blockFound &&
-                    abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 10f &&
-                    abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 7f &&
-                    abs(stableResult.pawnBaseY - nextResult.pawnBaseY) <= 7f &&
-                    abs(prevW - nextW) <= 18f
+                    stableResult.blockFound && nextResult.blockFound
                 ) {
-                    stableResult = nextResult
-                    stableDiag = nextPair.second
-                    lockedStable = true
-                    break
+                    missingBoardStreak = 0
+                    lastDistDrift = abs(stableResult.rawDistancePx - nextResult.rawDistancePx)
+                    lastPawnDrift = maxOf(
+                        abs(stableResult.pawnCenterX - nextResult.pawnCenterX),
+                        abs(stableResult.pawnBaseY - nextResult.pawnBaseY)
+                    )
+                    val widthDrift = abs(prevW - nextW)
+                    if (lastDistDrift <= 12f && lastPawnDrift <= 8f && widthDrift <= 20f) {
+                        stableResult = nextResult
+                        stableDiag = nextPair.second
+                        lockedStable = true
+                        break
+                    }
+                } else {
+                    missingBoardStreak++
+                    lastDistDrift = Float.MAX_VALUE
+                    lastPawnDrift = Float.MAX_VALUE
+                    if (missingBoardStreak >= 2) {
+                        if (nextPair != null) {
+                            stableResult = nextPair.first
+                            stableDiag = nextPair.second
+                        }
+                        break
+                    }
                 }
                 if (nextPair != null) {
                     stableResult = nextPair.first
@@ -307,7 +327,16 @@ class ScreenCaptureService : Service() {
                 checks++
             }
             if (!lockedStable) {
-                return 160L
+                if (!stableResult.pawnFound || !stableResult.blockFound) {
+                    lastTouchdownSnapshot = null
+                    AutomationBridge.updateAnalysis(stableResult)
+                    AutomationBridge.updateTrainingBanner("Standby (waiting for game board...)")
+                    return 260L
+                }
+                // Fallback: if pawn is stationary and block shimmer kept distance within 24px, proceed rather than stalling
+                if (lastPawnDrift > 8f || lastDistDrift > 24f) {
+                    return 110L
+                }
             }
         }
         lastTouchdownSnapshot = null
@@ -320,17 +349,17 @@ class ScreenCaptureService : Service() {
                 "${stableResult.statusMessage} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
                 isError = true
             )
-            return 480L
+            return 280L
         }
 
         if (!AutomationBridge.isAccessibilityConnected.value) {
             AutomationBridge.updateTrainingBanner("⚠ Enable Accessibility Touch!")
             AutomationBridge.appendLog("Waiting: toggle Accessibility Service OFF→ON in Settings", isError = true)
-            return 1200L
+            return 1000L
         }
 
-        val tapX = (screenWidth * config.tapXFraction).coerceIn(40f, screenWidth - 40f)
-        val tapY = (screenHeight * config.tapYFraction).coerceIn(40f, screenHeight - 40f)
+        val baseTapX = screenWidth * config.tapXFraction
+        val baseTapY = screenHeight * config.tapYFraction
         val holdMs = stableResult.computedDurationMs
 
         AutomationBridge.appendLog(
@@ -346,16 +375,27 @@ class ScreenCaptureService : Service() {
             )
         )
 
-        clearCachedFrame()
-        val completed = suspendCancellableCoroutine { cont ->
-            AutomationBridge.performHoldGesture(tapX, tapY, holdMs) { ok ->
-                if (cont.isActive) cont.resume(ok)
+        var completed = false
+        for (attempt in 0..1) {
+            val jitterX = kotlin.random.Random.nextInt(-10, 11).toFloat()
+            val jitterY = kotlin.random.Random.nextInt(-10, 11).toFloat()
+            val tapX = (baseTapX + jitterX).coerceIn(40f, screenWidth - 40f)
+            val tapY = (baseTapY + jitterY).coerceIn(40f, screenHeight - 40f)
+            clearCachedFrame()
+            completed = suspendCancellableCoroutine { cont ->
+                AutomationBridge.performHoldGesture(tapX, tapY, holdMs) { ok ->
+                    if (cont.isActive) cont.resume(ok)
+                }
+            }
+            if (completed || !AutomationBridge.isAccessibilityConnected.value) break
+            if (attempt == 0) {
+                delay(120L)
             }
         }
 
         if (!completed) {
             AutomationBridge.appendLog("Gesture dispatch failed or cancelled", isError = true)
-            return 800L
+            return 400L
         }
 
         // Flush any frame from during the hold so post-jump burst captures the real touchdown
@@ -383,7 +423,7 @@ class ScreenCaptureService : Service() {
         }
 
         // Wait remaining cooldown for camera pan / Game Over popup to finish settling
-        val remainingCooldown = (config.jumpCooldownMs - 570L).coerceAtLeast(450L)
+        val remainingCooldown = (config.jumpCooldownMs - 570L).coerceAtLeast(320L)
         delay(remainingCooldown)
         val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
 
@@ -464,7 +504,7 @@ class ScreenCaptureService : Service() {
             AutomationBridge.appendLog("Round ended ($outcome) — Auto stays armed; tap Replay in game to continue")
         }
 
-        return 120L
+        return 40L
     }
 
     private fun analyzeLatestFrameWithDiag(
