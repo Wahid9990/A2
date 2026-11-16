@@ -41,6 +41,8 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TouchApp
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -52,6 +54,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -84,9 +87,11 @@ fun DashboardScreen(
     liveAnalysis: VisionAnalysisResult?,
     logs: List<BotLogEntry>,
     trainingRecords: List<JumpTelemetryRecord>,
+    isDebugVisionEnabled: Boolean,
     onStartCapture: (Int, Intent) -> Unit,
     onStopCapture: () -> Unit,
     onToggleOverlay: () -> Unit,
+    onToggleDebugVision: () -> Unit,
     onToggleAutoLoop: () -> Unit,
     onTriggerSingleStep: () -> Unit,
     onCooldownChange: (Long) -> Unit,
@@ -240,6 +245,8 @@ fun DashboardScreen(
                 AutomationControlsCard(
                     permissions = permissions,
                     config = config,
+                    isDebugVisionEnabled = isDebugVisionEnabled,
+                    onToggleDebugVision = onToggleDebugVision,
                     onToggleAutoLoop = onToggleAutoLoop,
                     onTriggerSingleStep = onTriggerSingleStep,
                     onCooldownChange = onCooldownChange,
@@ -450,6 +457,8 @@ private fun PermissionStepCard(
 private fun AutomationControlsCard(
     permissions: PermissionReadiness,
     config: BotConfig,
+    isDebugVisionEnabled: Boolean,
+    onToggleDebugVision: () -> Unit,
     onToggleAutoLoop: () -> Unit,
     onTriggerSingleStep: () -> Unit,
     onCooldownChange: (Long) -> Unit,
@@ -528,6 +537,40 @@ private fun AutomationControlsCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Step Once")
                 }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = if (isDebugVisionEnabled) Icons.Filled.Visibility else Icons.Filled.VisibilityOff,
+                    contentDescription = "On-Screen Bot Vision Overlay",
+                    tint = if (isDebugVisionEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "On-Screen Bot Vision (👁)",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Shows ROI, Pawn stance, Target brackets & Stop reasons over game",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = isDebugVisionEnabled,
+                    onCheckedChange = { onToggleDebugVision() },
+                    modifier = Modifier.testTag("switch_debug_vision")
+                )
             }
 
             Column {

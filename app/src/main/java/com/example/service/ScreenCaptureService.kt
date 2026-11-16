@@ -29,8 +29,10 @@ import com.example.model.BotConfig
 import com.example.model.JumpOutcome
 import com.example.model.JumpTelemetryRecord
 import com.example.model.VisionAnalysisResult
+import com.example.model.VisionDebugStatus
 import com.example.training.JumpTrainer
 import com.example.vision.BlockVisionAnalyzer
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,6 +42,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.math.abs
@@ -218,17 +221,47 @@ class ScreenCaptureService : Service() {
         loopJob = serviceScope.launch {
             while (isActive) {
                 if (AutomationBridge.isAutoLoopActive.value) {
-                    val waitMs = executeSingleCycle()
+                    val waitMs = try {
+                        executeSingleCycle()
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (t: Throwable) {
+                        val errMsg = t.message ?: t.javaClass.simpleName
+                        AutomationBridge.appendLog("Loop recovered from error: $errMsg", isError = true)
+                        AutomationBridge.updateVisionDebugStatus(
+                            VisionDebugStatus(
+                                phase = "ERROR",
+                                message = "Recovered error: ${errMsg.take(48)}",
+                                showTargetHighlight = false
+                            )
+                        )
+                        450L
+                    }
                     delay(waitMs)
                 } else {
-                    delay(180L)
+                    if (AutomationBridge.isOverlayActive.value && AutomationBridge.isDebugVisionEnabled.value) {
+                        runCatching { publishLivePreviewFrame() }
+                        delay(420L)
+                    } else {
+                        delay(200L)
+                    }
                 }
             }
         }
 
         stepJob = serviceScope.launch {
             AutomationBridge.singleStepRequests.collect {
-                executeSingleCycle(requireStability = false)
+                try {
+                    executeSingleCycle(requireStability = false)
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (t: Throwable) {
+                    val errMsg = t.message ?: t.javaClass.simpleName
+                    AutomationBridge.appendLog("Step error: $errMsg", isError = true)
+                    AutomationBridge.updateVisionDebugStatus(
+                        VisionDebugStatus("ERROR", "Step error: ${errMsg.take(48)}", showTargetHighlight = false)
+                    )
+                }
             }
         }
 
@@ -260,16 +293,68 @@ class ScreenCaptureService : Service() {
         AutomationBridge.appendLog(msg)
     }
 
+    private fun publishLivePreviewFrame() {
+        val config = AutomationBridge.currentConfig.value
+        val overlayRect = AutomationBridge.overlayBounds.value
+        val pair = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
+        if (pair == null) {
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "NO_FRAME",
+                    message = "PAUSED · Waiting screen image from system",
+                    showTargetHighlight = false
+                )
+            )
+            return
+        }
+        val (res, diag) = pair
+        AutomationBridge.updateAnalysis(res)
+        val statusMsg = when {
+            !res.pawnFound -> "PAUSED · No Pawn found [sky=${diag.skyTopHex}/${diag.skyMidHex}]"
+            !res.blockFound -> "PAUSED · Pawn locked, no Block [sky=${diag.skyTopHex}/${diag.skyMidHex}]"
+            else -> "PREVIEW · ${res.targetBlockProfile.take(3)}/${res.pawnStance.take(4)} D=${res.rawDistancePx.roundToInt()} → ${res.computedDurationMs}ms"
+        }
+        AutomationBridge.updateVisionDebugStatus(
+            VisionDebugStatus(
+                phase = if (res.pawnFound && res.blockFound) "LOCKED" else "NO_BOARD",
+                message = statusMsg,
+                showTargetHighlight = res.pawnFound && res.blockFound
+            )
+        )
+    }
+
     private suspend fun executeSingleCycle(requireStability: Boolean = true): Long {
         val config = AutomationBridge.currentConfig.value
         val overlayRect = AutomationBridge.overlayBounds.value
 
-        var (stableResult, stableDiag) = analyzeLatestFrameWithDiag(
+        var initialPair = analyzeLatestFrameWithDiag(
             config = config,
             overlayRect = overlayRect,
             allowCached = true,
             touchdownSnapshot = lastTouchdownSnapshot
-        ) ?: return 220L
+        )
+        if (initialPair == null) {
+            delay(65L)
+            initialPair = analyzeLatestFrameWithDiag(
+                config = config,
+                overlayRect = overlayRect,
+                allowCached = true,
+                touchdownSnapshot = lastTouchdownSnapshot
+            )
+        }
+        if (initialPair == null) {
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "NO_FRAME",
+                    message = "Waiting screen frame (ImageReader empty)",
+                    showTargetHighlight = false
+                )
+            )
+            return 220L
+        }
+
+        var stableResult = initialPair.first
+        var stableDiag = initialPair.second
 
         val startManualEpoch = manualConfigEpoch
 
@@ -308,6 +393,14 @@ class ScreenCaptureService : Service() {
                         lockedStable = true
                         break
                     }
+                    AutomationBridge.updateAnalysis(nextResult)
+                    AutomationBridge.updateVisionDebugStatus(
+                        VisionDebugStatus(
+                            phase = "WAITING_STABILITY",
+                            message = "Stabilizing (${checks + 1}/6): ΔD=${lastDistDrift.roundToInt()}px ΔP=${lastPawnDrift.roundToInt()}px",
+                            showTargetHighlight = true
+                        )
+                    )
                 } else {
                     missingBoardStreak++
                     lastDistDrift = Float.MAX_VALUE
@@ -331,10 +424,25 @@ class ScreenCaptureService : Service() {
                     lastTouchdownSnapshot = null
                     AutomationBridge.updateAnalysis(stableResult)
                     AutomationBridge.updateTrainingBanner("Standby (waiting for game board...)")
+                    AutomationBridge.updateVisionDebugStatus(
+                        VisionDebugStatus(
+                            phase = "NO_BOARD",
+                            message = "${if (!stableResult.pawnFound) "No Pawn" else "No Target Block"} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
+                            showTargetHighlight = false
+                        )
+                    )
                     return 260L
                 }
                 // Fallback: if pawn is stationary and block shimmer kept distance within 24px, proceed rather than stalling
                 if (lastPawnDrift > 8f || lastDistDrift > 24f) {
+                    AutomationBridge.updateAnalysis(stableResult)
+                    AutomationBridge.updateVisionDebugStatus(
+                        VisionDebugStatus(
+                            phase = "WAITING_STABILITY",
+                            message = "Waiting settle: ΔD=${lastDistDrift.roundToInt()}px ΔP=${lastPawnDrift.roundToInt()}px",
+                            showTargetHighlight = true
+                        )
+                    )
                     return 110L
                 }
             }
@@ -349,12 +457,26 @@ class ScreenCaptureService : Service() {
                 "${stableResult.statusMessage} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
                 isError = true
             )
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "NO_BOARD",
+                    message = "${if (!stableResult.pawnFound) "No Pawn" else "No Target Block"} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
+                    showTargetHighlight = false
+                )
+            )
             return 280L
         }
 
         if (!AutomationBridge.isAccessibilityConnected.value) {
             AutomationBridge.updateTrainingBanner("⚠ Enable Accessibility Touch!")
             AutomationBridge.appendLog("Waiting: toggle Accessibility Service OFF→ON in Settings", isError = true)
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "TOUCH_OFF",
+                    message = "Accessibility Touch OFF — Re-enable in Settings",
+                    showTargetHighlight = true
+                )
+            )
             return 1000L
         }
 
@@ -384,12 +506,26 @@ class ScreenCaptureService : Service() {
             val jitterY = kotlin.random.Random.nextInt(-10, 11).toFloat()
             val tapX = (baseTapX + jitterX).coerceIn(40f, screenWidth - 40f)
             val tapY = (baseTapY + jitterY).coerceIn(40f, screenHeight - 40f)
+
+            // Hide target bracket right before touching so the post-jump sky never has stale brackets
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "HOLDING",
+                    message = "HOLD ${holdMs}ms → ${stableResult.targetBlockProfile.take(3)}/${stableResult.pawnStance.take(4)} (D=${stableResult.rawDistancePx.roundToInt()})",
+                    showTargetHighlight = false,
+                    holdingTapX = tapX,
+                    holdingTapY = tapY,
+                    isHolding = true
+                )
+            )
             clearCachedFrame()
-            completed = suspendCancellableCoroutine { cont ->
-                AutomationBridge.performHoldGesture(tapX, tapY, holdMs) { ok ->
-                    if (cont.isActive) cont.resume(ok)
+            completed = withTimeoutOrNull(holdMs + 2400L) {
+                suspendCancellableCoroutine { cont ->
+                    AutomationBridge.performHoldGesture(tapX, tapY, holdMs) { ok ->
+                        if (cont.isActive) cont.resume(ok)
+                    }
                 }
-            }
+            } ?: false
             if (completed || !AutomationBridge.isAccessibilityConnected.value) break
             if (attempt == 0) {
                 delay(120L)
@@ -397,9 +533,26 @@ class ScreenCaptureService : Service() {
         }
 
         if (!completed) {
-            AutomationBridge.appendLog("Gesture dispatch failed or cancelled", isError = true)
-            return 400L
+            AutomationBridge.appendLog("Gesture dispatch failed, cancelled, or timed out", isError = true)
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "ERROR",
+                    message = "Touch cancelled/timed out — retrying",
+                    showTargetHighlight = false,
+                    isHolding = false
+                )
+            )
+            return 350L
         }
+
+        AutomationBridge.updateVisionDebugStatus(
+            VisionDebugStatus(
+                phase = "SETTLING",
+                message = "Jumping... sampling landing & waiting settle",
+                showTargetHighlight = false,
+                isHolding = false
+            )
+        )
 
         // Flush any frame from during the hold so post-jump burst captures the real touchdown
         clearCachedFrame()

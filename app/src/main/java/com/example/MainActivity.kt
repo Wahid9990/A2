@@ -98,6 +98,7 @@ fun JumpAssistApp(viewModel: MainViewModel = viewModel()) {
     val sampleBitmap by viewModel.sampleBitmap.collectAsStateWithLifecycle()
     val sampleAnalysis by viewModel.sampleAnalysis.collectAsStateWithLifecycle()
     val isEyedropperActive by viewModel.isEyedropperActive.collectAsStateWithLifecycle()
+    val isDebugVisionEnabled by viewModel.isDebugVisionEnabled.collectAsStateWithLifecycle()
 
     fun navigateTo(route: String) {
         navController.navigate(route) {
@@ -179,9 +180,11 @@ fun JumpAssistApp(viewModel: MainViewModel = viewModel()) {
                             liveAnalysis = liveAnalysis,
                             logs = logs,
                             trainingRecords = trainingRecords,
+                            isDebugVisionEnabled = isDebugVisionEnabled,
                             onStartCapture = viewModel::startScreenCaptureService,
                             onStopCapture = viewModel::stopScreenCaptureService,
                             onToggleOverlay = viewModel::toggleOverlayService,
+                            onToggleDebugVision = viewModel::toggleDebugVisionEnabled,
                             onToggleAutoLoop = viewModel::toggleAutoLoop,
                             onTriggerSingleStep = viewModel::triggerSingleStep,
                             onCooldownChange = viewModel::updateJumpCooldown,

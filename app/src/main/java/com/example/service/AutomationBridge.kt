@@ -5,6 +5,7 @@ import com.example.model.BotConfig
 import com.example.model.BotLogEntry
 import com.example.model.JumpTelemetryRecord
 import com.example.model.VisionAnalysisResult
+import com.example.model.VisionDebugStatus
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -45,6 +46,12 @@ object AutomationBridge {
 
     private val _lastAnalysis = MutableStateFlow<VisionAnalysisResult?>(null)
     val lastAnalysis: StateFlow<VisionAnalysisResult?> = _lastAnalysis.asStateFlow()
+
+    private val _visionDebugStatus = MutableStateFlow(VisionDebugStatus())
+    val visionDebugStatus: StateFlow<VisionDebugStatus> = _visionDebugStatus.asStateFlow()
+
+    private val _isDebugVisionEnabled = MutableStateFlow(true)
+    val isDebugVisionEnabled: StateFlow<Boolean> = _isDebugVisionEnabled.asStateFlow()
 
     private val _logs = MutableStateFlow<List<BotLogEntry>>(emptyList())
     val logs: StateFlow<List<BotLogEntry>> = _logs.asStateFlow()
@@ -121,6 +128,19 @@ object AutomationBridge {
 
     fun updateAnalysis(result: VisionAnalysisResult) {
         _lastAnalysis.value = result
+    }
+
+    fun updateVisionDebugStatus(status: VisionDebugStatus) {
+        _visionDebugStatus.value = status
+    }
+
+    fun setDebugVisionEnabled(enabled: Boolean) {
+        _isDebugVisionEnabled.value = enabled
+        appendLog(if (enabled) "On-screen bot vision overlay ON" else "On-screen bot vision overlay OFF")
+    }
+
+    fun toggleDebugVisionEnabled() {
+        setDebugVisionEnabled(!_isDebugVisionEnabled.value)
     }
 
     fun nextRecordId(): Long = recordIdGen.getAndIncrement()

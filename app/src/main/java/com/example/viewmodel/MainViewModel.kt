@@ -66,6 +66,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val logs = AutomationBridge.logs
     val liveAnalysis = AutomationBridge.lastAnalysis
     val trainingRecords = AutomationBridge.trainingRecords
+    val isDebugVisionEnabled = AutomationBridge.isDebugVisionEnabled
 
     init {
         viewModelScope.launch {
@@ -150,6 +151,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else if (Settings.canDrawOverlays(ctx)) {
             ctx.startService(FloatingOverlayService.intent(ctx))
         }
+    }
+
+    fun toggleDebugVisionEnabled() {
+        AutomationBridge.toggleDebugVisionEnabled()
     }
 
     fun toggleAutoLoop() {

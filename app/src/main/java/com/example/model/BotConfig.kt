@@ -120,3 +120,12 @@ data class BotLogEntry(
     val message: String,
     val isError: Boolean = false
 )
+
+data class VisionDebugStatus(
+    val phase: String = "IDLE",
+    val message: String = "Waiting for screen capture...",
+    val showTargetHighlight: Boolean = false,
+    val holdingTapX: Float = 0f,
+    val holdingTapY: Float = 0f,
+    val isHolding: Boolean = false
+)
