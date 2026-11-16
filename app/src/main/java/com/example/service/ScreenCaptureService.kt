@@ -24,6 +24,12 @@ import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.data.BotPreferencesRepository
+import com.example.model.BotConfig
+import com.example.model.JumpOutcome
+import com.example.model.JumpTelemetryRecord
+import com.example.model.VisionAnalysisResult
+import com.example.training.JumpTrainer
 import com.example.vision.BlockVisionAnalyzer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -34,7 +40,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.Locale
 import kotlin.coroutines.resume
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 class ScreenCaptureService : Service() {
@@ -42,10 +50,16 @@ class ScreenCaptureService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var loopJob: Job? = null
     private var stepJob: Job? = null
+    private var feedbackJob: Job? = null
+
+    private lateinit var repository: BotPreferencesRepository
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+
+    private val bitmapLock = Any()
+    private var cachedBitmap: Bitmap? = null
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -57,6 +71,11 @@ class ScreenCaptureService : Service() {
             stopCaptureResources()
             stopSelf()
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        repository = BotPreferencesRepository(applicationContext)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -132,6 +151,7 @@ class ScreenCaptureService : Service() {
     private fun initializeProjection(resultCode: Int, data: Intent) {
         stopCaptureResources()
         resolveScreenMetrics()
+        AutomationBridge.setScreenDimensions(screenWidth, screenHeight)
 
         val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val projection = projectionManager.getMediaProjection(resultCode, data)
@@ -189,6 +209,7 @@ class ScreenCaptureService : Service() {
     private fun startWorkers() {
         loopJob?.cancel()
         stepJob?.cancel()
+        feedbackJob?.cancel()
 
         loopJob = serviceScope.launch {
             while (isActive) {
@@ -206,34 +227,59 @@ class ScreenCaptureService : Service() {
                 executeSingleCycle(requireStability = false)
             }
         }
+
+        feedbackJob = serviceScope.launch {
+            AutomationBridge.manualFeedbackRequests.collect { isShort ->
+                handleManualCorrection(isShort)
+            }
+        }
+    }
+
+    private suspend fun handleManualCorrection(isShort: Boolean) {
+        val cfg = AutomationBridge.currentConfig.value
+        val latest = AutomationBridge.trainingRecords.value.firstOrNull()
+        val (updatedCfg, updatedRec, msg) = JumpTrainer.applyManualFeedback(cfg, latest, isShort)
+        AutomationBridge.updateConfig(updatedCfg)
+        repository.updateConfig { updatedCfg }
+        if (updatedRec != null) {
+            AutomationBridge.replaceLatestTrainingRecord(updatedRec, msg)
+            repository.saveTrainingHistory(AutomationBridge.trainingRecords.value)
+        } else {
+            AutomationBridge.updateTrainingBanner(msg)
+        }
+        AutomationBridge.appendLog(msg)
     }
 
     private suspend fun executeSingleCycle(requireStability: Boolean = true): Long {
         val config = AutomationBridge.currentConfig.value
         val overlayRect = AutomationBridge.overlayBounds.value
 
-        var stableResult = analyzeLatestFrame(config, overlayRect) ?: return 300L
+        var (stableResult, stableDiag) = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
+            ?: return 300L
 
         if (requireStability && AutomationBridge.isAutoLoopActive.value) {
             var checks = 0
             while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
                 delay(150L)
-                val nextResult = analyzeLatestFrame(config, overlayRect)
+                val nextPair = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
+                val nextResult = nextPair?.first
                 val prevW = stableResult.blockBounds?.widthPx ?: 0f
                 val nextW = nextResult?.blockBounds?.widthPx ?: 0f
                 if (nextResult != null &&
                     stableResult.pawnFound && nextResult.pawnFound &&
                     stableResult.blockFound && nextResult.blockFound &&
-                    kotlin.math.abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 8f &&
-                    kotlin.math.abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 6f &&
-                    kotlin.math.abs(stableResult.pawnBaseY - nextResult.pawnBaseY) <= 6f &&
-                    kotlin.math.abs(prevW - nextW) <= 12f
+                    abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 8f &&
+                    abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 6f &&
+                    abs(stableResult.pawnBaseY - nextResult.pawnBaseY) <= 6f &&
+                    abs(prevW - nextW) <= 12f
                 ) {
                     stableResult = nextResult
+                    stableDiag = nextPair.second
                     break
                 }
-                if (nextResult != null) {
-                    stableResult = nextResult
+                if (nextPair != null) {
+                    stableResult = nextPair.first
+                    stableDiag = nextPair.second
                 }
                 checks++
             }
@@ -242,7 +288,10 @@ class ScreenCaptureService : Service() {
         AutomationBridge.updateAnalysis(stableResult)
 
         if (!stableResult.pawnFound || !stableResult.blockFound) {
-            AutomationBridge.appendLog(stableResult.statusMessage, isError = true)
+            AutomationBridge.appendLog(
+                "${stableResult.statusMessage} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
+                isError = true
+            )
             return 550L
         }
 
@@ -251,9 +300,19 @@ class ScreenCaptureService : Service() {
         val holdMs = stableResult.computedDurationMs
 
         AutomationBridge.appendLog(
-            "D=${stableResult.rawDistancePx.roundToInt()}px W=${stableResult.blockBounds?.widthPx?.roundToInt() ?: 0}px → Hold ${holdMs}ms"
+            String.format(
+                Locale.US,
+                "D=%.0fpx (n=%.0f) W=%.0fpx → Hold %dms (k=%.2f b=%.0f)",
+                stableResult.rawDistancePx,
+                stableResult.normalizedDistancePx,
+                stableResult.blockBounds?.widthPx ?: 0f,
+                holdMs,
+                config.kFactor,
+                config.offsetMs
+            )
         )
 
+        clearCachedFrame()
         val completed = suspendCancellableCoroutine { cont ->
             AutomationBridge.performHoldGesture(tapX, tapY, holdMs) { ok ->
                 if (cont.isActive) cont.resume(ok)
@@ -265,52 +324,187 @@ class ScreenCaptureService : Service() {
             return 800L
         }
 
-        return config.jumpCooldownMs.coerceAtLeast(600L)
+        // Flush any frame from during the hold so post-jump burst captures the real touchdown
+        clearCachedFrame()
+
+        // Measure post-jump touchdown before full camera pan completes
+        delay(420L)
+        val burst1 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = false)?.first
+        val r1 = JumpTrainer.computeLandingRatio(stableResult, burst1)
+
+        delay(150L)
+        val burst2 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
+        val r2 = JumpTrainer.computeLandingRatio(stableResult, burst2)
+
+        // Pick the closer-to-touchdown ratio (when r2 drifted back toward 0 during pan, r1 is touchdown;
+        // if burst1 was mid-flight or null, prefer valid r2)
+        val landingRatio = when {
+            r1 != null && r2 != null -> if (abs(r1 - 1f) <= abs(r2 - 1f) || r1 > r2 + 0.08f) r1 else r2
+            r1 != null -> r1
+            else -> r2
+        }
+
+        // Wait remaining cooldown for camera pan / Game Over popup to finish settling
+        val remainingCooldown = (config.jumpCooldownMs - 570L).coerceAtLeast(500L)
+        delay(remainingCooldown)
+        val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
+
+        val outcome = JumpTrainer.classifyOutcome(stableResult, landingRatio, postSettled)
+        val existingHistory = AutomationBridge.trainingRecords.value
+        val (updatedConfig, trainNote) = JumpTrainer.applyOnlineUpdate(
+            config = config,
+            dNorm = stableResult.normalizedDistancePx,
+            holdMs = holdMs,
+            outcome = outcome,
+            landingRatio = landingRatio,
+            history = existingHistory
+        )
+
+        val blk = stableResult.blockBounds!!
+        val ratioSummary = landingRatio?.let { String.format(Locale.US, "r=%.2f", it) } ?: "r=NA"
+        val banner = "${outcome.shortLabel} ($ratioSummary) · k=${String.format(Locale.US, "%.2f", updatedConfig.kFactor)}"
+        val record = JumpTelemetryRecord(
+            id = AutomationBridge.nextRecordId(),
+            timestamp = AutomationBridge.currentTimeStr(),
+            pawnX = stableResult.pawnCenterX,
+            pawnY = stableResult.pawnBaseY,
+            pawnPixels = stableResult.pawnPixelCount,
+            blockX = blk.center.x,
+            blockY = blk.center.y,
+            blockWidth = blk.widthPx,
+            blockHeight = blk.heightPx,
+            rawDistancePx = stableResult.rawDistancePx,
+            normalizedDistancePx = stableResult.normalizedDistancePx,
+            holdMs = holdMs,
+            landingRatio = landingRatio,
+            outcome = outcome,
+            kBefore = config.kFactor,
+            bBefore = config.offsetMs,
+            kAfter = updatedConfig.kFactor,
+            bAfter = updatedConfig.offsetMs,
+            skyTopHex = stableDiag.skyTopHex,
+            skyMidHex = stableDiag.skyMidHex,
+            pawnSampleHex = stableDiag.pawnSampleHex,
+            note = trainNote
+        )
+
+        AutomationBridge.prependTrainingRecord(record, banner)
+        repository.saveTrainingHistory(AutomationBridge.trainingRecords.value)
+
+        if (updatedConfig != config && config.autoTrainEnabled) {
+            AutomationBridge.updateConfig(updatedConfig)
+            repository.updateConfig { updatedConfig }
+            AutomationBridge.appendLog(
+                String.format(
+                    Locale.US,
+                    "Self-Train [%s %s]: k %.3f→%.3f, b %.0f→%.0f (%s)",
+                    outcome.shortLabel,
+                    ratioSummary,
+                    config.kFactor,
+                    updatedConfig.kFactor,
+                    config.offsetMs,
+                    updatedConfig.offsetMs,
+                    trainNote
+                )
+            )
+        } else {
+            AutomationBridge.appendLog("Result [${outcome.shortLabel} $ratioSummary] ($trainNote)")
+        }
+
+        // If Game Over detected after auto-loop jump, pause auto-loop cleanly instead of blindly spamming Restart UI
+        if (outcome == JumpOutcome.OUT_SHORT || outcome == JumpOutcome.OUT_OVERSHOOT || outcome == JumpOutcome.OUT_UNKNOWN) {
+            if (AutomationBridge.isAutoLoopActive.value) {
+                AutomationBridge.setAutoLoopActive(false)
+                AutomationBridge.appendLog("Auto-paused on Game Over ($outcome) — ready to Copy Data", isError = true)
+            }
+        }
+
+        return 120L
     }
 
-    private fun analyzeLatestFrame(
-        config: com.example.model.BotConfig,
-        overlayRect: android.graphics.Rect?
-    ): com.example.model.VisionAnalysisResult? {
-        val bitmap = acquireLatestBitmap() ?: return null
+    private fun analyzeLatestFrameWithDiag(
+        config: BotConfig,
+        overlayRect: android.graphics.Rect?,
+        allowCached: Boolean
+    ): Pair<VisionAnalysisResult, BlockVisionAnalyzer.FrameDiagnostics>? {
+        val bitmap = acquireLatestBitmapCopy(allowCached) ?: return null
         return try {
-            BlockVisionAnalyzer.analyze(bitmap, config, overlayRect)
+            val res = BlockVisionAnalyzer.analyze(bitmap, config, overlayRect)
+            val diag = BlockVisionAnalyzer.sampleFrameDiagnostics(
+                bitmap = bitmap,
+                roiTopY = res.roiTopY,
+                roiBottomY = res.roiBottomY,
+                pawnX = res.pawnCenterX,
+                pawnY = res.pawnBaseY
+            )
+            res to diag
         } finally {
             bitmap.recycle()
         }
     }
 
-    private fun acquireLatestBitmap(): Bitmap? {
-        val reader = imageReader ?: return null
-        val image: Image = reader.acquireLatestImage() ?: return null
-        return try {
-            val plane = image.planes[0]
-            val buffer = plane.buffer
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * screenWidth
-            val paddedWidth = screenWidth + rowPadding / pixelStride
-
-            val rawBitmap = Bitmap.createBitmap(paddedWidth, screenHeight, Bitmap.Config.ARGB_8888)
-            rawBitmap.copyPixelsFromBuffer(buffer)
-
-            if (paddedWidth == screenWidth) {
-                rawBitmap
-            } else {
-                val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, screenWidth, screenHeight)
-                rawBitmap.recycle()
-                cropped
+    private fun clearCachedFrame() {
+        synchronized(bitmapLock) {
+            cachedBitmap?.recycle()
+            cachedBitmap = null
+        }
+        runCatching {
+            var img = imageReader?.acquireLatestImage()
+            while (img != null) {
+                img.close()
+                img = imageReader?.acquireLatestImage()
             }
-        } catch (_: Throwable) {
-            null
-        } finally {
-            image.close()
+        }
+    }
+
+    private fun acquireLatestBitmapCopy(allowCached: Boolean): Bitmap? {
+        val reader = imageReader ?: return null
+        val image: Image? = runCatching { reader.acquireLatestImage() }.getOrNull()
+        if (image != null) {
+            val fresh = try {
+                val plane = image.planes[0]
+                val buffer = plane.buffer
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val rowPadding = rowStride - pixelStride * screenWidth
+                val paddedWidth = screenWidth + rowPadding / pixelStride
+
+                val rawBitmap = Bitmap.createBitmap(paddedWidth, screenHeight, Bitmap.Config.ARGB_8888)
+                rawBitmap.copyPixelsFromBuffer(buffer)
+
+                if (paddedWidth == screenWidth) {
+                    rawBitmap
+                } else {
+                    val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, screenWidth, screenHeight)
+                    rawBitmap.recycle()
+                    cropped
+                }
+            } catch (_: Throwable) {
+                null
+            } finally {
+                image.close()
+            }
+
+            if (fresh != null) {
+                synchronized(bitmapLock) {
+                    cachedBitmap?.recycle()
+                    cachedBitmap = fresh.copy(Bitmap.Config.ARGB_8888, false)
+                }
+                return fresh
+            }
+        }
+
+        if (!allowCached) return null
+        return synchronized(bitmapLock) {
+            cachedBitmap?.takeIf { !it.isRecycled }?.copy(Bitmap.Config.ARGB_8888, false)
         }
     }
 
     private fun stopCaptureResources() {
         loopJob?.cancel()
         stepJob?.cancel()
+        feedbackJob?.cancel()
+        clearCachedFrame()
         virtualDisplay?.release()
         virtualDisplay = null
         imageReader?.close()

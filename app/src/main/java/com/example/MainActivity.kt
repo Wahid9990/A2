@@ -94,6 +94,7 @@ fun JumpAssistApp(viewModel: MainViewModel = viewModel()) {
     val config by viewModel.config.collectAsStateWithLifecycle()
     val liveAnalysis by viewModel.liveAnalysis.collectAsStateWithLifecycle()
     val logs by viewModel.logs.collectAsStateWithLifecycle()
+    val trainingRecords by viewModel.trainingRecords.collectAsStateWithLifecycle()
     val sampleBitmap by viewModel.sampleBitmap.collectAsStateWithLifecycle()
     val sampleAnalysis by viewModel.sampleAnalysis.collectAsStateWithLifecycle()
     val isEyedropperActive by viewModel.isEyedropperActive.collectAsStateWithLifecycle()
@@ -177,6 +178,7 @@ fun JumpAssistApp(viewModel: MainViewModel = viewModel()) {
                             config = config,
                             liveAnalysis = liveAnalysis,
                             logs = logs,
+                            trainingRecords = trainingRecords,
                             onStartCapture = viewModel::startScreenCaptureService,
                             onStopCapture = viewModel::stopScreenCaptureService,
                             onToggleOverlay = viewModel::toggleOverlayService,
@@ -184,7 +186,12 @@ fun JumpAssistApp(viewModel: MainViewModel = viewModel()) {
                             onTriggerSingleStep = viewModel::triggerSingleStep,
                             onCooldownChange = viewModel::updateJumpCooldown,
                             onTapXChange = viewModel::updateTapX,
-                            onTapYChange = viewModel::updateTapY
+                            onTapYChange = viewModel::updateTapY,
+                            onToggleAutoTrain = viewModel::updateAutoTrainEnabled,
+                            onManualFeedback = viewModel::applyManualFeedback,
+                            onBuildReport = viewModel::buildTelemetryReport,
+                            onClearTrainingHistory = viewModel::clearTrainingHistory,
+                            onLogReportCopied = viewModel::logReportCopied
                         )
                     }
 

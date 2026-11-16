@@ -19,7 +19,45 @@ data class BotConfig(
     val tapYFraction: Float = 0.84f,
     val jumpCooldownMs: Long = 1800L,
     val minPressMs: Long = 90L,
-    val maxPressMs: Long = 1600L
+    val maxPressMs: Long = 1600L,
+    val autoTrainEnabled: Boolean = true
+)
+
+enum class JumpOutcome(val shortLabel: String) {
+    UNKNOWN("UNKNOWN"),
+    CENTER("CENTER"),
+    SHORT("SHORT"),
+    PAST_CENTER("PAST"),
+    OUT_SHORT("OUT_SHORT"),
+    OUT_OVERSHOOT("OUT_FAR"),
+    OUT_UNKNOWN("OUT"),
+    USER_SHORT("USR_SHORT"),
+    USER_LONG("USR_FAR")
+}
+
+data class JumpTelemetryRecord(
+    val id: Long,
+    val timestamp: String,
+    val pawnX: Float,
+    val pawnY: Float,
+    val pawnPixels: Int,
+    val blockX: Float,
+    val blockY: Float,
+    val blockWidth: Float,
+    val blockHeight: Float,
+    val rawDistancePx: Float,
+    val normalizedDistancePx: Float,
+    val holdMs: Long,
+    val landingRatio: Float?,
+    val outcome: JumpOutcome,
+    val kBefore: Float,
+    val bBefore: Float,
+    val kAfter: Float,
+    val bAfter: Float,
+    val skyTopHex: String = "",
+    val skyMidHex: String = "",
+    val pawnSampleHex: String = "",
+    val note: String = ""
 )
 
 data class PointF2D(

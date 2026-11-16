@@ -6,9 +6,9 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.graphics.Rect
 import android.os.Build
 import android.os.IBinder
 import android.view.Gravity
@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.roundToInt
 
 class FloatingOverlayService : Service() {
@@ -30,6 +31,7 @@ class FloatingOverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var rootView: LinearLayout? = null
     private lateinit var telemetryText: TextView
+    private lateinit var trainStatusText: TextView
     private lateinit var autoButton: Button
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -93,7 +95,15 @@ class FloatingOverlayService : Service() {
             setTextColor(Color.rgb(241, 245, 249))
             textSize = 11f
             typeface = Typeface.MONOSPACE
-            setPadding(0, dp(4), 0, dp(8))
+            setPadding(0, dp(4), 0, dp(2))
+        }
+
+        trainStatusText = TextView(this).apply {
+            text = "Train: READY"
+            setTextColor(Color.rgb(16, 185, 129))
+            textSize = 10f
+            typeface = Typeface.MONOSPACE
+            setPadding(0, 0, 0, dp(6))
         }
 
         val buttonRow = LinearLayout(this).apply {
@@ -121,9 +131,38 @@ class FloatingOverlayService : Service() {
         buttonRow.addView(spacer)
         buttonRow.addView(autoButton)
 
+        // Manual Self-Train nudge pills for immediate correction if user spots short/long jump
+        val trainRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, 0)
+        }
+
+        val shortBtn = createSmallFeedbackButton("◀ Too Short", Color.rgb(51, 35, 12), Color.rgb(251, 191, 36), dp(6)).apply {
+            setOnClickListener {
+                AutomationBridge.requestManualFeedback(isShort = true)
+            }
+        }
+
+        val trainSpacer = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(6), dp(1))
+        }
+
+        val longBtn = createSmallFeedbackButton("Too Far ▶", Color.rgb(66, 20, 32), Color.rgb(251, 113, 133), dp(6)).apply {
+            setOnClickListener {
+                AutomationBridge.requestManualFeedback(isShort = false)
+            }
+        }
+
+        trainRow.addView(shortBtn)
+        trainRow.addView(trainSpacer)
+        trainRow.addView(longBtn)
+
         container.addView(headerRow)
         container.addView(telemetryText)
+        container.addView(trainStatusText)
         container.addView(buttonRow)
+        container.addView(trainRow)
 
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -199,9 +238,27 @@ class FloatingOverlayService : Service() {
             isAllCaps = false
             background = drawable
             setPadding(horizontalPad * 2, horizontalPad / 2, horizontalPad * 2, horizontalPad / 2)
-            minHeight = (36 * resources.displayMetrics.density).roundToInt()
+            minHeight = (34 * resources.displayMetrics.density).roundToInt()
             minimumHeight = minHeight
             minWidth = (64 * resources.displayMetrics.density).roundToInt()
+        }
+    }
+
+    private fun createSmallFeedbackButton(label: String, bgColor: Int, textColor: Int, horizontalPad: Int): Button {
+        val drawable = GradientDrawable().apply {
+            setColor(bgColor)
+            cornerRadius = horizontalPad * 1.2f
+        }
+        return Button(this).apply {
+            text = label
+            setTextColor(textColor)
+            textSize = 10f
+            isAllCaps = false
+            background = drawable
+            setPadding(horizontalPad + 4, horizontalPad / 3, horizontalPad + 4, horizontalPad / 3)
+            minHeight = (28 * resources.displayMetrics.density).roundToInt()
+            minimumHeight = minHeight
+            minWidth = (56 * resources.displayMetrics.density).roundToInt()
         }
     }
 
@@ -215,9 +272,22 @@ class FloatingOverlayService : Service() {
                     telemetryText.text = if (analysis.blockFound) {
                         "D: ${d}px  W: ${w}px  →  ${t}ms"
                     } else {
-                        analysis.statusMessage.take(34)
+                        analysis.statusMessage.take(32)
                     }
                 }
+            }
+        }
+
+        serviceScope.launch {
+            AutomationBridge.lastTrainingBanner.collect { banner ->
+                val cfg = AutomationBridge.currentConfig.value
+                trainStatusText.text = banner ?: String.format(
+                    Locale.US,
+                    "Train:%s · k=%.2f b=%.0f",
+                    if (cfg.autoTrainEnabled) "ON" else "OFF",
+                    cfg.kFactor,
+                    cfg.offsetMs
+                )
             }
         }
 

@@ -70,7 +70,9 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.model.BotConfig
 import com.example.model.BotLogEntry
+import com.example.model.JumpTelemetryRecord
 import com.example.model.VisionAnalysisResult
+import com.example.ui.components.SelfTrainingCard
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.viewmodel.PermissionReadiness
 import kotlin.math.roundToInt
@@ -81,6 +83,7 @@ fun DashboardScreen(
     config: BotConfig,
     liveAnalysis: VisionAnalysisResult?,
     logs: List<BotLogEntry>,
+    trainingRecords: List<JumpTelemetryRecord>,
     onStartCapture: (Int, Intent) -> Unit,
     onStopCapture: () -> Unit,
     onToggleOverlay: () -> Unit,
@@ -89,6 +92,11 @@ fun DashboardScreen(
     onCooldownChange: (Long) -> Unit,
     onTapXChange: (Float) -> Unit,
     onTapYChange: (Float) -> Unit,
+    onToggleAutoTrain: (Boolean) -> Unit,
+    onManualFeedback: (Boolean) -> Unit,
+    onBuildReport: () -> String,
+    onClearTrainingHistory: () -> Unit,
+    onLogReportCopied: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -230,6 +238,18 @@ fun DashboardScreen(
                     onCooldownChange = onCooldownChange,
                     onTapXChange = onTapXChange,
                     onTapYChange = onTapYChange
+                )
+            }
+
+            item {
+                SelfTrainingCard(
+                    config = config,
+                    records = trainingRecords,
+                    onToggleAutoTrain = onToggleAutoTrain,
+                    onManualFeedback = onManualFeedback,
+                    onBuildReport = onBuildReport,
+                    onClearHistory = onClearTrainingHistory,
+                    onLogCopied = onLogReportCopied
                 )
             }
 

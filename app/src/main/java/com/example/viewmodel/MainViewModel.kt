@@ -22,6 +22,7 @@ import com.example.service.AutomationBridge
 import com.example.service.FloatingOverlayService
 import com.example.service.JumpAccessibilityService
 import com.example.service.ScreenCaptureService
+import com.example.training.JumpTrainer
 import com.example.vision.BlockVisionAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,6 +64,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val logs = AutomationBridge.logs
     val liveAnalysis = AutomationBridge.lastAnalysis
+    val trainingRecords = AutomationBridge.trainingRecords
 
     init {
         viewModelScope.launch {
@@ -70,6 +72,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _config.value = loaded
                 AutomationBridge.updateConfig(loaded)
                 reanalyzeCurrentBitmap(loaded)
+            }
+        }
+
+        viewModelScope.launch {
+            repository.trainingHistoryFlow.collect { history ->
+                if (AutomationBridge.trainingRecords.value.isEmpty() && history.isNotEmpty()) {
+                    AutomationBridge.setTrainingRecords(history)
+                }
             }
         }
 
@@ -241,6 +251,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun updateJumpCooldown(valueMs: Long) = updateConfig { it.copy(jumpCooldownMs = valueMs) }
     fun updateTapX(value: Float) = updateConfig { it.copy(tapXFraction = value.coerceIn(0.1f, 0.9f)) }
     fun updateTapY(value: Float) = updateConfig { it.copy(tapYFraction = value.coerceIn(0.4f, 0.94f)) }
+    fun updateAutoTrainEnabled(enabled: Boolean) {
+        updateConfig { it.copy(autoTrainEnabled = enabled) }
+        AutomationBridge.appendLog(if (enabled) "Self-Training enabled" else "Self-Training paused")
+    }
+
+    fun applyManualFeedback(isShort: Boolean) {
+        if (AutomationBridge.isScreenCaptureActive.value) {
+            AutomationBridge.requestManualFeedback(isShort)
+            return
+        }
+        viewModelScope.launch {
+            val cfg = _config.value
+            val latest = AutomationBridge.trainingRecords.value.firstOrNull()
+            val (updatedCfg, updatedRec, msg) = JumpTrainer.applyManualFeedback(cfg, latest, isShort)
+            repository.updateConfig { updatedCfg }
+            if (updatedRec != null) {
+                AutomationBridge.replaceLatestTrainingRecord(updatedRec, msg)
+                repository.saveTrainingHistory(AutomationBridge.trainingRecords.value)
+            } else {
+                AutomationBridge.updateTrainingBanner(msg)
+            }
+            AutomationBridge.appendLog(msg)
+        }
+    }
+
+    fun buildTelemetryReport(): String {
+        val (w, h) = AutomationBridge.screenDimensions.value
+        return JumpTrainer.formatTelemetryReport(
+            config = _config.value,
+            records = AutomationBridge.trainingRecords.value,
+            logs = AutomationBridge.logs.value,
+            screenW = w,
+            screenH = h
+        )
+    }
+
+    fun clearTrainingHistory() {
+        viewModelScope.launch {
+            AutomationBridge.setTrainingRecords(emptyList())
+            AutomationBridge.updateTrainingBanner(null)
+            repository.clearTrainingHistory()
+            AutomationBridge.appendLog("Cleared saved training history")
+        }
+    }
+
+    fun logReportCopied() {
+        val count = AutomationBridge.trainingRecords.value.size
+        AutomationBridge.appendLog("Copied training report to clipboard ($count jumps)")
+    }
 
     fun resetDefaults() {
         viewModelScope.launch {

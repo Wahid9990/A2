@@ -293,6 +293,36 @@ object BlockVisionAnalyzer {
         )
     }
 
+    data class FrameDiagnostics(
+        val skyTopHex: String,
+        val skyMidHex: String,
+        val pawnSampleHex: String
+    )
+
+    fun sampleFrameDiagnostics(
+        bitmap: Bitmap,
+        roiTopY: Float,
+        roiBottomY: Float,
+        pawnX: Float,
+        pawnY: Float
+    ): FrameDiagnostics {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 10 || h < 10) return FrameDiagnostics("#000000", "#000000", "#000000")
+        fun hexAt(x: Int, y: Int): String {
+            val px = bitmap.getPixel(x.coerceIn(0, w - 1), y.coerceIn(0, h - 1)) and 0xFFFFFF
+            return String.format(java.util.Locale.US, "#%06X", px)
+        }
+        val topY = roiTopY.roundToInt().coerceIn(0, h - 1)
+        val midY = ((roiTopY + roiBottomY) * 0.5f).roundToInt().coerceIn(0, h - 1)
+        val samplePawnY = (pawnY - w * 0.045f).roundToInt().coerceIn(0, h - 1)
+        return FrameDiagnostics(
+            skyTopHex = hexAt((w * 0.04f).roundToInt(), topY),
+            skyMidHex = hexAt((w * 0.96f).roundToInt(), midY),
+            pawnSampleHex = if (pawnX > 1f) hexAt(pawnX.roundToInt(), samplePawnY) else "#000000"
+        )
+    }
+
     private fun detectPawn(
         pixels: IntArray,
         width: Int,

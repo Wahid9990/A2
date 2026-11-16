@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -11,8 +12,12 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.model.BotConfig
 import com.example.model.FormulaMode
+import com.example.model.JumpOutcome
+import com.example.model.JumpTelemetryRecord
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
+import org.json.JSONObject
 
 private val Context.botDataStore: DataStore<Preferences> by preferencesDataStore(name = "jump_assist_prefs")
 
@@ -33,66 +38,53 @@ class BotPreferencesRepository(private val context: Context) {
         val JUMP_COOLDOWN_MS = longPreferencesKey("jump_cooldown_ms")
         val MIN_PRESS_MS = longPreferencesKey("min_press_ms")
         val MAX_PRESS_MS = longPreferencesKey("max_press_ms")
+        val AUTO_TRAIN_ENABLED = booleanPreferencesKey("auto_train_enabled")
+        val TRAINING_HISTORY_JSON = stringPreferencesKey("training_history_json")
         val CALIB_VERSION = intPreferencesKey("calib_version")
     }
 
     private companion object {
         const val CURRENT_CALIB_VERSION = 2
+        const val MAX_STORED_RECORDS = 60
     }
 
     val configFlow: Flow<BotConfig> = context.botDataStore.data.map { prefs ->
+        readConfigFromPrefs(prefs)
+    }
+
+    val trainingHistoryFlow: Flow<List<JumpTelemetryRecord>> = context.botDataStore.data.map { prefs ->
+        val raw = prefs[Keys.TRAINING_HISTORY_JSON] ?: return@map emptyList()
+        decodeHistory(raw)
+    }
+
+    private fun readConfigFromPrefs(prefs: Preferences): BotConfig {
         val migrated = (prefs[Keys.CALIB_VERSION] ?: 1) >= CURRENT_CALIB_VERSION
-        val modeName = if (migrated) (prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name) else FormulaMode.LINEAR.name
-        val mode = runCatching { FormulaMode.valueOf(modeName) }.getOrDefault(FormulaMode.LINEAR)
         val defaults = BotConfig()
-        if (!migrated) {
-            defaults
-        } else {
-            BotConfig(
-                formulaMode = mode,
-                kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
-                offsetMs = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs,
-                quadFactor = prefs[Keys.QUAD_FACTOR] ?: defaults.quadFactor,
-                pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: defaults.pawnColorRgb,
-                pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: defaults.pawnColorTolerance,
-                bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: defaults.bgDiffThreshold,
-                roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: defaults.roiTopFraction,
-                roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: defaults.roiBottomFraction,
-                tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: defaults.tapXFraction,
-                tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: defaults.tapYFraction,
-                jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs,
-                minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
-                maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs
-            )
-        }
+        if (!migrated) return defaults
+        val modeName = prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name
+        val mode = runCatching { FormulaMode.valueOf(modeName) }.getOrDefault(FormulaMode.LINEAR)
+        return BotConfig(
+            formulaMode = mode,
+            kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
+            offsetMs = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs,
+            quadFactor = prefs[Keys.QUAD_FACTOR] ?: defaults.quadFactor,
+            pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: defaults.pawnColorRgb,
+            pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: defaults.pawnColorTolerance,
+            bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: defaults.bgDiffThreshold,
+            roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: defaults.roiTopFraction,
+            roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: defaults.roiBottomFraction,
+            tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: defaults.tapXFraction,
+            tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: defaults.tapYFraction,
+            jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs,
+            minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
+            maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs,
+            autoTrainEnabled = prefs[Keys.AUTO_TRAIN_ENABLED] ?: defaults.autoTrainEnabled
+        )
     }
 
     suspend fun updateConfig(transform: (BotConfig) -> BotConfig) {
         context.botDataStore.edit { prefs ->
-            val migrated = (prefs[Keys.CALIB_VERSION] ?: 1) >= CURRENT_CALIB_VERSION
-            val defaults = BotConfig()
-            val current = if (!migrated) {
-                defaults
-            } else {
-                BotConfig(
-                    formulaMode = runCatching {
-                        FormulaMode.valueOf(prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name)
-                    }.getOrDefault(FormulaMode.LINEAR),
-                    kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
-                    offsetMs = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs,
-                    quadFactor = prefs[Keys.QUAD_FACTOR] ?: defaults.quadFactor,
-                    pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: defaults.pawnColorRgb,
-                    pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: defaults.pawnColorTolerance,
-                    bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: defaults.bgDiffThreshold,
-                    roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: defaults.roiTopFraction,
-                    roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: defaults.roiBottomFraction,
-                    tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: defaults.tapXFraction,
-                    tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: defaults.tapYFraction,
-                    jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs,
-                    minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
-                    maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs
-                )
-            }
+            val current = readConfigFromPrefs(prefs)
             val updated = transform(current)
             prefs[Keys.CALIB_VERSION] = CURRENT_CALIB_VERSION
             prefs[Keys.FORMULA_MODE] = updated.formulaMode.name
@@ -109,10 +101,104 @@ class BotPreferencesRepository(private val context: Context) {
             prefs[Keys.JUMP_COOLDOWN_MS] = updated.jumpCooldownMs
             prefs[Keys.MIN_PRESS_MS] = updated.minPressMs
             prefs[Keys.MAX_PRESS_MS] = updated.maxPressMs
+            prefs[Keys.AUTO_TRAIN_ENABLED] = updated.autoTrainEnabled
+        }
+    }
+
+    suspend fun saveTrainingHistory(records: List<JumpTelemetryRecord>) {
+        val trimmed = records.take(MAX_STORED_RECORDS)
+        val encoded = encodeHistory(trimmed)
+        context.botDataStore.edit { prefs ->
+            prefs[Keys.CALIB_VERSION] = CURRENT_CALIB_VERSION
+            prefs[Keys.TRAINING_HISTORY_JSON] = encoded
+        }
+    }
+
+    suspend fun clearTrainingHistory() {
+        context.botDataStore.edit { prefs ->
+            prefs.remove(Keys.TRAINING_HISTORY_JSON)
         }
     }
 
     suspend fun resetDefaults() {
-        context.botDataStore.edit { it.clear() }
+        context.botDataStore.edit { prefs ->
+            val historyJson = prefs[Keys.TRAINING_HISTORY_JSON]
+            prefs.clear()
+            prefs[Keys.CALIB_VERSION] = CURRENT_CALIB_VERSION
+            if (historyJson != null) {
+                prefs[Keys.TRAINING_HISTORY_JSON] = historyJson
+            }
+        }
+    }
+
+    private fun encodeHistory(records: List<JumpTelemetryRecord>): String {
+        val arr = JSONArray()
+        records.forEach { r ->
+            val obj = JSONObject().apply {
+                put("id", r.id)
+                put("ts", r.timestamp)
+                put("px", r.pawnX.toDouble())
+                put("py", r.pawnY.toDouble())
+                put("pp", r.pawnPixels)
+                put("bx", r.blockX.toDouble())
+                put("by", r.blockY.toDouble())
+                put("bw", r.blockWidth.toDouble())
+                put("bh", r.blockHeight.toDouble())
+                put("dr", r.rawDistancePx.toDouble())
+                put("dn", r.normalizedDistancePx.toDouble())
+                put("hm", r.holdMs)
+                if (r.landingRatio != null) put("lr", r.landingRatio.toDouble())
+                put("out", r.outcome.name)
+                put("kb", r.kBefore.toDouble())
+                put("bb", r.bBefore.toDouble())
+                put("ka", r.kAfter.toDouble())
+                put("ba", r.bAfter.toDouble())
+                put("st", r.skyTopHex)
+                put("sm", r.skyMidHex)
+                put("ps", r.pawnSampleHex)
+                put("nt", r.note)
+            }
+            arr.put(obj)
+        }
+        return arr.toString()
+    }
+
+    private fun decodeHistory(raw: String): List<JumpTelemetryRecord> {
+        return runCatching {
+            val arr = JSONArray(raw)
+            val list = ArrayList<JumpTelemetryRecord>(arr.length())
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val outName = o.optString("out", JumpOutcome.UNKNOWN.name)
+                val outcome = runCatching { JumpOutcome.valueOf(outName) }.getOrDefault(JumpOutcome.UNKNOWN)
+                list.add(
+                    JumpTelemetryRecord(
+                        id = o.optLong("id", 0L),
+                        timestamp = o.optString("ts", ""),
+                        pawnX = o.optDouble("px", 0.0).toFloat(),
+                        pawnY = o.optDouble("py", 0.0).toFloat(),
+                        pawnPixels = o.optInt("pp", 0),
+                        blockX = o.optDouble("bx", 0.0).toFloat(),
+                        blockY = o.optDouble("by", 0.0).toFloat(),
+                        blockWidth = o.optDouble("bw", 0.0).toFloat(),
+                        blockHeight = o.optDouble("bh", 0.0).toFloat(),
+                        rawDistancePx = o.optDouble("dr", 0.0).toFloat(),
+                        normalizedDistancePx = o.optDouble("dn", 0.0).toFloat(),
+                        holdMs = o.optLong("hm", 0L),
+                        landingRatio = if (o.has("lr")) o.optDouble("lr").toFloat() else null,
+                        outcome = outcome,
+                        kBefore = o.optDouble("kb", 1.26).toFloat(),
+                        bBefore = o.optDouble("bb", 38.0).toFloat(),
+                        kAfter = o.optDouble("ka", 1.26).toFloat(),
+                        bAfter = o.optDouble("ba", 38.0).toFloat(),
+                        skyTopHex = o.optString("st", ""),
+                        skyMidHex = o.optString("sm", ""),
+                        pawnSampleHex = o.optString("ps", ""),
+                        note = o.optString("nt", "")
+                    )
+                )
+            }
+            list
+        }.getOrDefault(emptyList())
     }
 }

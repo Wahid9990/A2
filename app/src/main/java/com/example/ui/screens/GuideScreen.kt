@@ -117,7 +117,8 @@ fun GuideScreen(modifier: Modifier = Modifier) {
                         "Take one screenshot of your installed jumping game and open it in the Calibrate tab via Screenshot.",
                         "Tap Pick Color (eyedropper) and touch your pawn's body so the analyzer locks its exact RGB signature.",
                         "Adjust ROI Top/Bottom and Edge Threshold until the amber box tightly frames the next block's top face.",
-                        "Switch to the game with the Floating HUD active and tap Step Once: if the pawn undershoots, raise k by +0.05; if it overshoots consistently on short and long jumps alike, lower offsetMs by 15ms."
+                        "Auto-Training Loop: Enable Self-Training (on by default) so JumpAssist checks your landing position right after each jump and auto-tunes k and offsetMs.",
+                        "Manual Nudge & Data Export: Use '◀ Too Short' or 'Too Far ▶' on the Floating HUD if needed, or tap 'Copy Training Data' on the Setup tab after a run to share exact telemetry for custom tuning."
                     )
                 )
             }
