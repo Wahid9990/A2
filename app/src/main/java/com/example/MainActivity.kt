@@ -12,11 +12,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Dashboard
-import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -58,7 +58,7 @@ private enum class AppDestination(
 ) {
     DASHBOARD("dashboard", "Setup", Icons.Filled.Dashboard, Icons.Outlined.Dashboard, "nav_dashboard"),
     CALIBRATE("calibrate", "Calibrate", Icons.Filled.Tune, Icons.Outlined.Tune, "nav_calibrate"),
-    GUIDE("guide", "Guide", Icons.Filled.MenuBook, Icons.Outlined.MenuBook, "nav_guide")
+    GUIDE("guide", "Guide", Icons.AutoMirrored.Filled.MenuBook, Icons.AutoMirrored.Outlined.MenuBook, "nav_guide")
 }
 
 class MainActivity : ComponentActivity() {

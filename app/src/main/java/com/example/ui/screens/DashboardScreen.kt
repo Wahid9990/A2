@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ScreenShare
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Layers
@@ -37,7 +38,6 @@ import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TouchApp
@@ -149,7 +149,7 @@ fun DashboardScreen(
                     )
 
                     PermissionStepCard(
-                        icon = Icons.Filled.ScreenShare,
+                        icon = Icons.AutoMirrored.Filled.ScreenShare,
                         title = "Screen Capture (MediaProjection)",
                         subtitle = if (permissions.captureRunning) {
                             "Streaming frames to BlockVisionAnalyzer"
