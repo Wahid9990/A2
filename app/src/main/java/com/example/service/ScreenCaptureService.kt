@@ -62,6 +62,8 @@ class ScreenCaptureService : Service() {
     private var cachedBitmap: Bitmap? = null
     @Volatile
     private var manualConfigEpoch = 0L
+    @Volatile
+    private var lastTouchdownSnapshot: BlockVisionAnalyzer.UpperRoiSnapshot? = null
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -262,27 +264,36 @@ class ScreenCaptureService : Service() {
         val config = AutomationBridge.currentConfig.value
         val overlayRect = AutomationBridge.overlayBounds.value
 
-        var (stableResult, stableDiag) = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
-            ?: return 300L
+        var (stableResult, stableDiag) = analyzeLatestFrameWithDiag(
+            config = config,
+            overlayRect = overlayRect,
+            allowCached = true,
+            touchdownSnapshot = lastTouchdownSnapshot
+        ) ?: return 300L
 
         val startManualEpoch = manualConfigEpoch
 
         if (requireStability && AutomationBridge.isAutoLoopActive.value) {
             var checks = 0
             var lockedStable = false
-            while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
+            while (checks < 8 && AutomationBridge.isAutoLoopActive.value) {
                 delay(150L)
-                val nextPair = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
+                val nextPair = analyzeLatestFrameWithDiag(
+                    config = config,
+                    overlayRect = overlayRect,
+                    allowCached = true,
+                    touchdownSnapshot = lastTouchdownSnapshot
+                )
                 val nextResult = nextPair?.first
                 val prevW = stableResult.blockBounds?.widthPx ?: 0f
                 val nextW = nextResult?.blockBounds?.widthPx ?: 0f
                 if (nextResult != null &&
                     stableResult.pawnFound && nextResult.pawnFound &&
                     stableResult.blockFound && nextResult.blockFound &&
-                    abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 8f &&
-                    abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 6f &&
-                    abs(stableResult.pawnBaseY - nextResult.pawnBaseY) <= 6f &&
-                    abs(prevW - nextW) <= 12f
+                    abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 10f &&
+                    abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 7f &&
+                    abs(stableResult.pawnBaseY - nextResult.pawnBaseY) <= 7f &&
+                    abs(prevW - nextW) <= 18f
                 ) {
                     stableResult = nextResult
                     stableDiag = nextPair.second
@@ -296,9 +307,10 @@ class ScreenCaptureService : Service() {
                 checks++
             }
             if (!lockedStable) {
-                return 220L
+                return 160L
             }
         }
+        lastTouchdownSnapshot = null
 
         AutomationBridge.updateAnalysis(stableResult)
 
@@ -308,7 +320,7 @@ class ScreenCaptureService : Service() {
                 "${stableResult.statusMessage} [sky=${stableDiag.skyTopHex}/${stableDiag.skyMidHex}]",
                 isError = true
             )
-            return 550L
+            return 480L
         }
 
         if (!AutomationBridge.isAccessibilityConnected.value) {
@@ -355,8 +367,10 @@ class ScreenCaptureService : Service() {
         val r1 = JumpTrainer.computeLandingRatio(stableResult, burst1)
 
         delay(80L)
-        val burst2 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
+        val burst2Triple = analyzeLatestFrameWithSnapshot(config, overlayRect, allowCached = true)
+        val burst2 = burst2Triple?.first
         val r2 = JumpTrainer.computeLandingRatio(stableResult, burst2)
+        lastTouchdownSnapshot = burst2Triple?.third
 
         val landingRatio = when {
             r1 != null && r2 != null -> when {
@@ -445,6 +459,7 @@ class ScreenCaptureService : Service() {
 
         // Keep Auto-Loop ARMED across Game Over so user just taps Play Again and self-training continues!
         if (outcome == JumpOutcome.OUT_SHORT || outcome == JumpOutcome.OUT_OVERSHOOT || outcome == JumpOutcome.OUT_UNKNOWN) {
+            lastTouchdownSnapshot = null
             AutomationBridge.updateTrainingBanner("OUT ($ratioSummary) · Armed for Replay")
             AutomationBridge.appendLog("Round ended ($outcome) — Auto stays armed; tap Replay in game to continue")
         }
@@ -455,8 +470,44 @@ class ScreenCaptureService : Service() {
     private fun analyzeLatestFrameWithDiag(
         config: BotConfig,
         overlayRect: android.graphics.Rect?,
-        allowCached: Boolean
+        allowCached: Boolean,
+        touchdownSnapshot: BlockVisionAnalyzer.UpperRoiSnapshot? = null
     ): Pair<VisionAnalysisResult, BlockVisionAnalyzer.FrameDiagnostics>? {
+        val bitmap = acquireLatestBitmapCopy(allowCached) ?: return null
+        return try {
+            var res = BlockVisionAnalyzer.analyze(bitmap, config, overlayRect)
+            if (touchdownSnapshot != null && res.pawnFound) {
+                val hint = BlockVisionAnalyzer.detectNewlyAppearedHint(
+                    prevSnapshot = touchdownSnapshot,
+                    currentBitmap = bitmap,
+                    currPawnX = res.pawnCenterX,
+                    currPawnY = res.pawnBaseY
+                )
+                if (hint != null) {
+                    res = BlockVisionAnalyzer.analyze(bitmap, config, overlayRect, preferredTargetHint = hint)
+                }
+            }
+            val diag = BlockVisionAnalyzer.sampleFrameDiagnostics(
+                bitmap = bitmap,
+                roiTopY = res.roiTopY,
+                roiBottomY = res.roiBottomY,
+                pawnX = res.pawnCenterX,
+                pawnY = res.pawnBaseY,
+                blockX = res.blockBounds?.center?.x ?: 0f,
+                blockY = res.blockBounds?.center?.y ?: 0f,
+                blockBottomY = res.blockBounds?.bottomY ?: 0f
+            )
+            res to diag
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun analyzeLatestFrameWithSnapshot(
+        config: BotConfig,
+        overlayRect: android.graphics.Rect?,
+        allowCached: Boolean
+    ): Triple<VisionAnalysisResult, BlockVisionAnalyzer.FrameDiagnostics, BlockVisionAnalyzer.UpperRoiSnapshot?>? {
         val bitmap = acquireLatestBitmapCopy(allowCached) ?: return null
         return try {
             val res = BlockVisionAnalyzer.analyze(bitmap, config, overlayRect)
@@ -470,7 +521,16 @@ class ScreenCaptureService : Service() {
                 blockY = res.blockBounds?.center?.y ?: 0f,
                 blockBottomY = res.blockBounds?.bottomY ?: 0f
             )
-            res to diag
+            val snap = if (res.pawnFound) {
+                BlockVisionAnalyzer.captureUpperRoiSnapshot(
+                    bitmap = bitmap,
+                    roiTopY = res.roiTopY,
+                    roiBottomY = res.roiBottomY,
+                    pawnX = res.pawnCenterX,
+                    pawnY = res.pawnBaseY
+                )
+            } else null
+            Triple(res, diag, snap)
         } finally {
             bitmap.recycle()
         }
@@ -534,6 +594,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun stopCaptureResources() {
+        lastTouchdownSnapshot = null
         loopJob?.cancel()
         stepJob?.cancel()
         feedbackJob?.cancel()

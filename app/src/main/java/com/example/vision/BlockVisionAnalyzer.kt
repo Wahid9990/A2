@@ -44,10 +44,22 @@ object BlockVisionAnalyzer {
         val lastTopRowY: Int
     )
 
+    data class UpperRoiSnapshot(
+        val gridWidth: Int,
+        val gridHeight: Int,
+        val stepPx: Int,
+        val roiTop: Int,
+        val roiBottom: Int,
+        val pawnX: Float,
+        val pawnY: Float,
+        val pixels: IntArray
+    )
+
     fun analyze(
         bitmap: Bitmap,
         config: BotConfig,
-        excludedRect: Rect? = null
+        excludedRect: Rect? = null,
+        preferredTargetHint: PointF2D? = null
     ): VisionAnalysisResult {
         val startNs = System.nanoTime()
         val width = bitmap.width
@@ -178,7 +190,10 @@ object BlockVisionAnalyzer {
             minRunLength = minRunLength,
             minValidBlockWidth = minValidBlockWidth,
             minValidBlockHeight = minValidBlockHeight,
-            rejectDarkShadows = false
+            rejectDarkShadows = true,
+            requireSharpBoundary = true,
+            allowShadowLeftOffset = false,
+            preferredTargetHint = preferredTargetHint
         )
 
         if (block != null) {
@@ -212,7 +227,8 @@ object BlockVisionAnalyzer {
                 minValidBlockWidth = minValidBlockWidth,
                 minValidBlockHeight = minValidBlockHeight,
                 rejectDarkShadows = true,
-                requireSharpBoundary = true
+                requireSharpBoundary = true,
+                preferredTargetHint = preferredTargetHint
             )
         }
 
@@ -236,7 +252,8 @@ object BlockVisionAnalyzer {
                 minValidBlockHeight = max(minValidBlockHeight, (height * 0.028f).roundToInt()),
                 rejectDarkShadows = true,
                 requireInternalContrast = true,
-                requireSharpBoundary = true
+                requireSharpBoundary = true,
+                preferredTargetHint = preferredTargetHint
             )
         }
 
@@ -357,6 +374,81 @@ object BlockVisionAnalyzer {
             blockTopHex = if (hasBlock) hexAt(blockX.roundToInt(), blockY.roundToInt()) else "",
             blockSideHex = if (hasBlock) hexAt((blockX - w * 0.04f).roundToInt(), sideY) else ""
         )
+    }
+
+    fun captureUpperRoiSnapshot(
+        bitmap: Bitmap,
+        roiTopY: Float,
+        roiBottomY: Float,
+        pawnX: Float,
+        pawnY: Float
+    ): UpperRoiSnapshot? {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 64 || h < 64 || pawnY <= roiTopY + 32f) return null
+        val stepPx = max(6, w / 90)
+        val top = roiTopY.roundToInt().coerceIn(0, h - 1)
+        val bottom = min(roiBottomY.roundToInt(), (pawnY - w * 0.05f).roundToInt()).coerceIn(top + stepPx, h - 1)
+        val gw = ((w - 1) / stepPx) + 1
+        val gh = ((bottom - top) / stepPx) + 1
+        val grid = IntArray(gw * gh)
+        val rowBuf = IntArray(w)
+        var gy = 0
+        while (gy < gh) {
+            val sy = (top + gy * stepPx).coerceAtMost(h - 1)
+            bitmap.getPixels(rowBuf, 0, w, 0, sy, w, 1)
+            var gx = 0
+            val off = gy * gw
+            while (gx < gw) {
+                val sx = (gx * stepPx).coerceAtMost(w - 1)
+                grid[off + gx] = rowBuf[sx]
+                gx++
+            }
+            gy++
+        }
+        return UpperRoiSnapshot(gw, gh, stepPx, top, bottom, pawnX, pawnY, grid)
+    }
+
+    /**
+     * Detects the centroid of a newly arrived block in the upper board when comparing
+     * a post-touchdown snapshot (before/as the new block dropped in) with the current settled frame.
+     * Returns null if camera pan shifted the pawn significantly so panning isn't mistaken for a new block.
+     */
+    fun detectNewlyAppearedHint(
+        prevSnapshot: UpperRoiSnapshot?,
+        currentBitmap: Bitmap,
+        currPawnX: Float,
+        currPawnY: Float
+    ): PointF2D? {
+        if (prevSnapshot == null) return null
+        val w = currentBitmap.width
+        val h = currentBitmap.height
+        if (abs(prevSnapshot.pawnX - currPawnX) > w * 0.045f || abs(prevSnapshot.pawnY - currPawnY) > w * 0.045f) {
+            return null
+        }
+        val stepPx = prevSnapshot.stepPx
+        val pawnExclR = w * 0.14f
+        val rowBuf = IntArray(w)
+        var sumX = 0.0
+        var sumY = 0.0
+        var hits = 0
+        for (gy in 1 until prevSnapshot.gridHeight - 1) {
+            val sy = (prevSnapshot.roiTop + gy * stepPx).coerceIn(0, h - 1)
+            currentBitmap.getPixels(rowBuf, 0, w, 0, sy, w, 1)
+            val off = gy * prevSnapshot.gridWidth
+            for (gx in 1 until prevSnapshot.gridWidth - 1) {
+                val sx = (gx * stepPx).coerceAtMost(w - 1)
+                if (hypot(sx - currPawnX, sy - currPawnY) < pawnExclR) continue
+                val dSq = colorDistSq(prevSnapshot.pixels[off + gx], rowBuf[sx])
+                if (dSq > 1100) {
+                    sumX += sx
+                    sumY += sy
+                    hits++
+                }
+            }
+        }
+        if (hits < 12) return null
+        return PointF2D((sumX / hits).toFloat(), (sumY / hits).toFloat())
     }
 
     private fun detectPawn(
@@ -544,7 +636,9 @@ object BlockVisionAnalyzer {
         minValidBlockHeight: Int,
         rejectDarkShadows: Boolean,
         requireInternalContrast: Boolean = false,
-        requireSharpBoundary: Boolean = false
+        requireSharpBoundary: Boolean = false,
+        allowShadowLeftOffset: Boolean = false,
+        preferredTargetHint: PointF2D? = null
     ): BlockTrace? {
         val maxBlockScanY = (pawnBaseY - roiTop - 10).roundToInt().coerceIn(0, roiHeight - 1)
         val maxValidBlockWidth = (width * 0.45f).roundToInt()
@@ -552,6 +646,105 @@ object BlockVisionAnalyzer {
 
         var bestBlock: BlockTrace? = null
         var bestScore = Float.NEGATIVE_INFINITY
+        // Track valid [minX, maxX, minY, maxY] footprints and rejected apex seeds [apexX, startY]
+        // so rejected sky glows never mask overlapping real blocks nearby.
+        val validRegions = ArrayList<IntArray>(8)
+        val rejectedSeeds = ArrayList<IntArray>(24)
+
+        fun evaluateRun(ry: Int, apexX: Float) {
+            val ax = apexX.roundToInt()
+            for (r in validRegions) {
+                if (ax in r[0]..r[1] && ry in r[2]..r[3]) return
+            }
+            for (s in rejectedSeeds) {
+                if (abs(ax - s[0]) <= 16 && ry in s[1]..(s[1] + 18)) return
+            }
+
+            val traced = traceBlockDownward(
+                pixels = pixels,
+                width = width,
+                roiTop = roiTop,
+                roiHeight = roiHeight,
+                marginX = marginX,
+                startY = ry,
+                apexX = apexX,
+                minValidBlockWidth = minValidBlockWidth,
+                excludedRect = excludedRect,
+                thresholdSq = thresholdSq,
+                rejectDarkShadows = rejectDarkShadows
+            )
+
+            val cHeight = traced.lastTopRowY - ry
+            val centerX = traced.apexX * 0.35f + ((traced.widestLeftX + traced.widestRightX) * 0.5f) * 0.65f
+            val isIsometricDiamond = traced.widestRowY > traced.apexY + 6
+            val centerYRel = if (isIsometricDiamond) {
+                val projectedEquator = traced.apexY + traced.maxTopWidth * 0.285f
+                (traced.widestRowY * 0.5f + projectedEquator * 0.5f)
+            } else {
+                (traced.apexY + traced.lastTopRowY) / 2f
+            }
+            val centerY = roiTop + centerYRel
+
+            val dxAbs = abs(centerX - pawnCenterX)
+            val dyAbs = pawnBaseY - centerY
+            val distFromPawn = hypot(dxAbs, dyAbs)
+            val overlapsPawnBase = pawnCenterX in (traced.widestLeftX - 12f)..(traced.widestRightX + 12f) &&
+                pawnBaseY in (roiTop + ry - 10f)..(roiTop + traced.lastTopRowY + width * 0.22f)
+
+            val contrastOk = !requireInternalContrast || hasInternalBlockContrast(
+                pixels = pixels,
+                width = width,
+                roiHeight = roiHeight,
+                traced = traced
+            )
+            val sharpBoundaryOk = (!requireSharpBoundary && !requireInternalContrast) || hasSharpBoundaryEdge(
+                pixels = pixels,
+                width = width,
+                roiHeight = roiHeight,
+                traced = traced,
+                marginX = marginX,
+                allowShadowLeftOffset = allowShadowLeftOffset
+            )
+
+            val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
+                cHeight >= minValidBlockHeight &&
+                distFromPawn >= width * 0.15f &&
+                !overlapsPawnBase &&
+                dyAbs >= minVerticalClimb &&
+                dxAbs >= dyAbs * 0.25f &&
+                contrastOk &&
+                sharpBoundaryOk
+
+            if (validGeometry) {
+                val sideWallPad = max(12, (traced.maxTopWidth * 0.42f).roundToInt())
+                validRegions.add(
+                    intArrayOf(
+                        (traced.widestLeftX - 8f).roundToInt(),
+                        (traced.widestRightX + 8f).roundToInt(),
+                        ry,
+                        max(ry + 6, traced.lastTopRowY) + sideWallPad
+                    )
+                )
+                // Prefer true 30-degree isometric blocks closest to the pawn and near newly arrived hints
+                val isoRatio = dxAbs / dyAbs.coerceAtLeast(1f)
+                val isoBonus = when {
+                    isoRatio in 0.85f..2.20f -> 450f
+                    isoRatio in 0.35f..0.85f -> 180f
+                    else -> 0f
+                }
+                val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.42f).roundToInt()) 150f else 0f
+                val hintBonus = if (preferredTargetHint != null &&
+                    hypot(centerX - preferredTargetHint.x, centerY - preferredTargetHint.y) <= width * 0.18f
+                ) 320f else 0f
+                val score = isoBonus + sizeBonus + hintBonus - distFromPawn
+                if (score > bestScore) {
+                    bestScore = score
+                    bestBlock = traced
+                }
+            } else {
+                rejectedSeeds.add(intArrayOf(ax, ry))
+            }
+        }
 
         var ry = 0
         while (ry <= maxBlockScanY) {
@@ -560,7 +753,6 @@ object BlockVisionAnalyzer {
             val leftBg = pixels[rowOffset + marginX / 2]
             val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
 
-            var candidateApexX = -1f
             var runStart = -1
             var runCount = 0
 
@@ -582,87 +774,17 @@ object BlockVisionAnalyzer {
                     runCount++
                 } else {
                     if (runCount >= minRunLength) {
-                        candidateApexX = (runStart + (x - step)) / 2f
-                        break
+                        evaluateRun(ry, (runStart + (x - step)) / 2f)
                     }
                     runStart = -1
                     runCount = 0
                 }
                 x += step
             }
-            if (candidateApexX < 0f && runCount >= minRunLength) {
-                candidateApexX = (runStart + (width - marginX)) / 2f
+            if (runCount >= minRunLength) {
+                evaluateRun(ry, (runStart + (width - marginX)) / 2f)
             }
-
-            if (candidateApexX >= 0f) {
-                val traced = traceBlockDownward(
-                    pixels = pixels,
-                    width = width,
-                    roiTop = roiTop,
-                    roiHeight = roiHeight,
-                    marginX = marginX,
-                    startY = ry,
-                    apexX = candidateApexX,
-                    minValidBlockWidth = minValidBlockWidth,
-                    excludedRect = excludedRect,
-                    thresholdSq = thresholdSq,
-                    rejectDarkShadows = rejectDarkShadows
-                )
-                val cHeight = traced.lastTopRowY - ry
-                val centerX = traced.apexX * 0.35f + ((traced.widestLeftX + traced.widestRightX) * 0.5f) * 0.65f
-                val isIsometricDiamond = traced.widestRowY > traced.apexY + 6
-                val centerYRel = if (isIsometricDiamond) {
-                    val projectedEquator = traced.apexY + traced.maxTopWidth * 0.285f
-                    (traced.widestRowY * 0.5f + projectedEquator * 0.5f)
-                } else {
-                    (traced.apexY + traced.lastTopRowY) / 2f
-                }
-                val centerY = roiTop + centerYRel
-
-                val dxAbs = abs(centerX - pawnCenterX)
-                val dyAbs = pawnBaseY - centerY
-                val distFromPawn = hypot(dxAbs, dyAbs)
-                val overlapsPawnBase = pawnCenterX in (traced.widestLeftX - 10f)..(traced.widestRightX + 10f) &&
-                    pawnBaseY in (roiTop + ry - 8f)..(roiTop + traced.lastTopRowY + width * 0.14f)
-
-                val contrastOk = !requireInternalContrast || hasInternalBlockContrast(
-                    pixels = pixels,
-                    width = width,
-                    roiHeight = roiHeight,
-                    traced = traced
-                )
-                val sharpBoundaryOk = (!requireSharpBoundary && !requireInternalContrast) || hasSharpBoundaryEdge(
-                    pixels = pixels,
-                    width = width,
-                    roiHeight = roiHeight,
-                    traced = traced,
-                    marginX = marginX
-                )
-
-                val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
-                    cHeight >= minValidBlockHeight &&
-                    distFromPawn >= width * 0.15f &&
-                    !overlapsPawnBase &&
-                    dyAbs >= minVerticalClimb &&
-                    dxAbs >= dyAbs * 0.25f &&
-                    contrastOk &&
-                    sharpBoundaryOk
-
-                if (validGeometry) {
-                    // Prefer the true next block (closest diagonal platform above the pawn rather than far 2nd blocks)
-                    val isoRatio = dxAbs / dyAbs.coerceAtLeast(1f)
-                    val isoBonus = if (isoRatio in 0.35f..1.85f) 400f else 0f
-                    val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.42f).roundToInt()) 150f else 0f
-                    val score = isoBonus + sizeBonus - distFromPawn
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestBlock = traced
-                    }
-                }
-                ry = max(ry + 2, traced.lastTopRowY + 4)
-                continue
-            }
-            ry++
+            ry += 3
         }
         return bestBlock
     }
@@ -700,29 +822,50 @@ object BlockVisionAnalyzer {
         width: Int,
         roiHeight: Int,
         traced: BlockTrace,
-        marginX: Int
+        marginX: Int,
+        allowShadowLeftOffset: Boolean = false
     ): Boolean {
+        val apexX = traced.apexX.roundToInt().coerceIn(8, width - 9)
+        val aboveApexY = (traced.apexY - 10).coerceIn(0, roiHeight - 1)
+        val insideApexY = (traced.apexY + 12).coerceIn(0, roiHeight - 1)
+        val apexJump = maxOf(
+            colorDistSq(pixels[aboveApexY * width + apexX], pixels[insideApexY * width + apexX]),
+            colorDistSq(pixels[aboveApexY * width + (apexX - 6)], pixels[insideApexY * width + (apexX - 6)]),
+            colorDistSq(pixels[aboveApexY * width + (apexX + 6)], pixels[insideApexY * width + (apexX + 6)])
+        )
+        if (apexJump < 180) return false
+
         val leftX = traced.widestLeftX.roundToInt()
         val rightX = traced.widestRightX.roundToInt()
         val outLeftX = (leftX - 10).coerceIn(marginX / 2, width - 1)
         val inLeftX = (leftX + 10).coerceIn(0, width - 1)
+        val inLeftDeepX = (leftX + 24).coerceIn(0, width - 1)
         val outRightX = (rightX + 10).coerceIn(0, width - 1 - marginX / 2)
         val inRightX = (rightX - 10).coerceIn(0, width - 1)
 
         val rowA = traced.widestRowY.coerceIn(0, roiHeight - 1)
         val rowB = (traced.widestRowY + 8).coerceIn(0, roiHeight - 1)
 
-        val leftJump = max(
+        val leftJumpDirect = max(
             colorDistSq(pixels[rowA * width + inLeftX], pixels[rowA * width + outLeftX]),
             colorDistSq(pixels[rowB * width + inLeftX], pixels[rowB * width + outLeftX])
         )
+        val leftJump = if (allowShadowLeftOffset) {
+            maxOf(
+                leftJumpDirect,
+                colorDistSq(pixels[rowA * width + inLeftDeepX], pixels[rowA * width + outLeftX]),
+                colorDistSq(pixels[rowB * width + inLeftDeepX], pixels[rowB * width + outLeftX])
+            )
+        } else {
+            leftJumpDirect
+        }
         val rightJump = max(
             colorDistSq(pixels[rowA * width + inRightX], pixels[rowA * width + outRightX]),
             colorDistSq(pixels[rowB * width + inRightX], pixels[rowB * width + outRightX])
         )
 
-        // Smooth radial sky glow changes <= 50 across 20px; real block borders jump sharply
-        return max(leftJump, rightJump) >= 240 && min(leftJump, rightJump) >= 110
+        // Smooth radial sky vignette changes <= 50 across 20px; real block polygons jump sharply at top, left, and right
+        return rightJump >= 180 && leftJump >= 110 && max(leftJump, rightJump) >= 240
     }
 
     private fun traceBlockDownward(
@@ -884,6 +1027,7 @@ object BlockVisionAnalyzer {
 
         if (baseBlock.apexY - newApexY < 6) return baseBlock
 
+        val baseCenterX = (baseBlock.widestLeftX + baseBlock.widestRightX) * 0.5f
         return traceBlockDownward(
             pixels = pixels,
             width = width,
@@ -897,7 +1041,19 @@ object BlockVisionAnalyzer {
             thresholdSq = translucentThresholdSq,
             rejectDarkShadows = true
         ).let { extended ->
-            if (extended.maxTopWidth >= baseBlock.maxTopWidth * 0.92f) extended else baseBlock
+            val extCenterX = (extended.widestLeftX + extended.widestRightX) * 0.5f
+            val aligned = abs(extCenterX - baseCenterX) <= baseBlock.maxTopWidth * 0.14f
+            val reasonableW = extended.maxTopWidth >= baseBlock.maxTopWidth * 0.92f &&
+                extended.maxTopWidth <= baseBlock.maxTopWidth * 1.12f
+            val sharpEdges = hasSharpBoundaryEdge(
+                pixels = pixels,
+                width = width,
+                roiHeight = roiHeight,
+                traced = extended,
+                marginX = marginX,
+                allowShadowLeftOffset = false
+            )
+            if (aligned && reasonableW && sharpEdges) extended else baseBlock
         }
     }
 
@@ -943,9 +1099,15 @@ object BlockVisionAnalyzer {
         if (rejectDarkShadows) {
             val pxLum = r * 3 + g * 6 + b
             val bgLum = bgR * 3 + bgG * 6 + bgB
-            val maxChromaShift = maxOf(abs(dr - dg), abs(dg - db), abs(dr - db))
-            // Reject neutral/desaturated dark drop shadows on the sky, while keeping colored dark/slate blocks
-            if (pxLum < bgLum - 40 && maxChromaShift < 14) return false
+            if (pxLum < bgLum - 40 && bgLum > 80) {
+                val maxChromaShift = maxOf(abs(dr - dg), abs(dg - db), abs(dr - db))
+                val scale256 = (pxLum * 256) / bgLum
+                val expR = (bgR * scale256) shr 8
+                val expG = (bgG * scale256) shr 8
+                val expB = (bgB * scale256) shr 8
+                val shadowHueErr = maxOf(abs(r - expR), abs(g - expG), abs(b - expB))
+                if (maxChromaShift < 14 || shadowHueErr <= 11) return false
+            }
         }
 
         return (dr * dr + dg * dg + db * db) > thresholdSq

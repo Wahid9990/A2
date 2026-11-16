@@ -204,16 +204,16 @@ class BlockVisionAnalyzerTest {
         }
         canvas.drawRect(0f, 0f, w.toFloat(), h.toFloat(), skyPaint)
 
-        // Draw smooth radial center sky glow (#816ACF -> transparent) around (360, 690)
+        // Draw smooth strong radial center sky vignette (#8F74DF center over #4F448A -> #7D65C1 sky so center vs edge distSq > 5000 exceeds Pass 1!)
         val glowPaint = android.graphics.Paint().apply {
             shader = android.graphics.RadialGradient(
-                360f, 690f, 220f,
-                intArrayOf(android.graphics.Color.argb(220, 0x84, 0x6C, 0xD2), android.graphics.Color.argb(0, 0x7D, 0x65, 0xC1)),
+                360f, 690f, 240f,
+                intArrayOf(android.graphics.Color.argb(245, 0x8F, 0x74, 0xDF), android.graphics.Color.argb(0, 0x5B, 0x48, 0x94)),
                 null,
                 android.graphics.Shader.TileMode.CLAMP
             )
         }
-        canvas.drawCircle(360f, 690f, 220f, glowPaint)
+        canvas.drawCircle(360f, 690f, 240f, glowPaint)
 
         // Draw pawn at (218, 954) so sky glow at (360, 690) is right in the false target zone
         val pawnPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
@@ -232,10 +232,10 @@ class BlockVisionAnalyzerTest {
         canvas.drawOval(px - 12f, py - 56f, px + 12f, py - 46f, collarPaint)
         canvas.drawCircle(px, py - 70f, 12f, pawnPaint)
 
-        // Verify empty sky glow frame does NOT falsely lock onto (360, 690)
+        // Verify empty sky glow frame does NOT falsely lock onto (360, 690) even in Pass 1
         val emptySkyResult = BlockVisionAnalyzer.analyze(bmp, config)
         assertTrue("Pawn should be detected on radial glow frame", emptySkyResult.pawnFound)
-        assertTrue("Smooth radial sky glow #816ACF must NOT be detected as a block, got ${emptySkyResult.blockBounds}", !emptySkyResult.blockFound)
+        assertTrue("Smooth radial sky glow #8F74DF must NOT be detected as a block, got ${emptySkyResult.blockBounds}", !emptySkyResult.blockFound)
 
         // Now paint a wide (308px) & vertically close (dy = 82px) real chest block at (500, 872)
         val bx = 500f
@@ -266,5 +266,49 @@ class BlockVisionAnalyzerTest {
             "Analyzer should lock onto real block near (500, 872) rather than sky glow (360, 690); got $lockedCenter",
             lockedCenter != null && kotlin.math.abs(lockedCenter.x - 500f) < 35f && kotlin.math.abs(lockedCenter.y - 872f) < 35f
         )
+    }
+
+    @Test
+    fun `detects newly appeared upper block centroid between touchdown and settled frames`() {
+        val config = BotConfig(roiTopFraction = 0.28f, roiBottomFraction = 0.72f)
+        val bmpPre = BlockVisionAnalyzer.generateSyntheticTestFrame(
+            width = 720,
+            height = 1600,
+            pawnColorRgb = config.pawnColorRgb,
+            targetBlockWidthPx = 220f,
+            distanceFactor = 0.72f
+        )
+        val preRes = BlockVisionAnalyzer.analyze(bmpPre, config)
+        assertTrue("Pawn should lock on touchdown frame", preRes.pawnFound)
+
+        // Wipe the synthetic target block in bmpTouchdown so it simulates the frame BEFORE the new block drops in
+        val bmpTouchdown = bmpPre.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+        val wipeCanvas = android.graphics.Canvas(bmpTouchdown)
+        val wipePaint = android.graphics.Paint().apply { color = android.graphics.Color.rgb(112, 118, 178) }
+        val bx = preRes.blockBounds!!.center.x
+        val by = preRes.blockBounds!!.center.y
+        wipeCanvas.drawRect(bx - 130f, by - 90f, bx + 130f, by + 130f, wipePaint)
+
+        val snap = BlockVisionAnalyzer.captureUpperRoiSnapshot(
+            bitmap = bmpTouchdown,
+            roiTopY = preRes.roiTopY,
+            roiBottomY = preRes.roiBottomY,
+            pawnX = preRes.pawnCenterX,
+            pawnY = preRes.pawnBaseY
+        )
+
+        // Compare touchdown (without block) against bmpPre (with newly dropped block)
+        val hint = BlockVisionAnalyzer.detectNewlyAppearedHint(
+            prevSnapshot = snap,
+            currentBitmap = bmpPre,
+            currPawnX = preRes.pawnCenterX,
+            currPawnY = preRes.pawnBaseY
+        )
+        val hintedRes = BlockVisionAnalyzer.analyze(bmpPre, config, preferredTargetHint = hint)
+        bmpTouchdown.recycle()
+        bmpPre.recycle()
+
+        assertTrue("Newly appeared hint should point near ($bx, $by), got $hint", hint != null && kotlin.math.abs(hint.x - bx) < 45f && kotlin.math.abs(hint.y - by) < 85f)
+        assertTrue("Hinted analysis should lock cleanly onto new block", hintedRes.blockFound)
     }
 }

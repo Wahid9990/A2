@@ -44,7 +44,7 @@ class BotPreferencesRepository(private val context: Context) {
     }
 
     private companion object {
-        const val CURRENT_CALIB_VERSION = 6
+        const val CURRENT_CALIB_VERSION = 7
         const val MAX_STORED_RECORDS = 60
     }
 
