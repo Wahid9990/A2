@@ -103,7 +103,7 @@ fun GuideScreen(modifier: Modifier = Modifier) {
                     """.trimIndent(),
                     bullets = listOf(
                         "Resolution Normalization: Scaling D_raw to a 1080px reference width keeps your calibrated k slope consistent across 720p, 1080p, and 1440p displays.",
-                        "Baseline Starting Values: k = 1.35 ms/px and offset = 25 ms (adjust in the Calibrate tab)."
+                        "Baseline Starting Values: k = 1.26 ms/px and offset = 38 ms (tuned from real gameplay telemetry; adjust in the Calibrate tab)."
                     )
                 )
             }

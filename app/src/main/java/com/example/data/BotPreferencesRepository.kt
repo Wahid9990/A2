@@ -33,50 +33,68 @@ class BotPreferencesRepository(private val context: Context) {
         val JUMP_COOLDOWN_MS = longPreferencesKey("jump_cooldown_ms")
         val MIN_PRESS_MS = longPreferencesKey("min_press_ms")
         val MAX_PRESS_MS = longPreferencesKey("max_press_ms")
+        val CALIB_VERSION = intPreferencesKey("calib_version")
+    }
+
+    private companion object {
+        const val CURRENT_CALIB_VERSION = 2
     }
 
     val configFlow: Flow<BotConfig> = context.botDataStore.data.map { prefs ->
-        val modeName = prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name
+        val migrated = (prefs[Keys.CALIB_VERSION] ?: 1) >= CURRENT_CALIB_VERSION
+        val modeName = if (migrated) (prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name) else FormulaMode.LINEAR.name
         val mode = runCatching { FormulaMode.valueOf(modeName) }.getOrDefault(FormulaMode.LINEAR)
-        BotConfig(
-            formulaMode = mode,
-            kFactor = prefs[Keys.K_FACTOR] ?: 1.35f,
-            offsetMs = prefs[Keys.OFFSET_MS] ?: 25f,
-            quadFactor = prefs[Keys.QUAD_FACTOR] ?: 0.00025f,
-            pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: 0x3E3353,
-            pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: 34,
-            bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: 38,
-            roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: 0.28f,
-            roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: 0.72f,
-            tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: 0.50f,
-            tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: 0.84f,
-            jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: 1800L,
-            minPressMs = prefs[Keys.MIN_PRESS_MS] ?: 90L,
-            maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: 1600L
-        )
+        val defaults = BotConfig()
+        if (!migrated) {
+            defaults
+        } else {
+            BotConfig(
+                formulaMode = mode,
+                kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
+                offsetMs = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs,
+                quadFactor = prefs[Keys.QUAD_FACTOR] ?: defaults.quadFactor,
+                pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: defaults.pawnColorRgb,
+                pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: defaults.pawnColorTolerance,
+                bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: defaults.bgDiffThreshold,
+                roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: defaults.roiTopFraction,
+                roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: defaults.roiBottomFraction,
+                tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: defaults.tapXFraction,
+                tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: defaults.tapYFraction,
+                jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs,
+                minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
+                maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs
+            )
+        }
     }
 
     suspend fun updateConfig(transform: (BotConfig) -> BotConfig) {
         context.botDataStore.edit { prefs ->
-            val current = BotConfig(
-                formulaMode = runCatching {
-                    FormulaMode.valueOf(prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name)
-                }.getOrDefault(FormulaMode.LINEAR),
-                kFactor = prefs[Keys.K_FACTOR] ?: 1.35f,
-                offsetMs = prefs[Keys.OFFSET_MS] ?: 25f,
-                quadFactor = prefs[Keys.QUAD_FACTOR] ?: 0.00025f,
-                pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: 0x3E3353,
-                pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: 34,
-                bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: 38,
-                roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: 0.28f,
-                roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: 0.72f,
-                tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: 0.50f,
-                tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: 0.84f,
-                jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: 1800L,
-                minPressMs = prefs[Keys.MIN_PRESS_MS] ?: 90L,
-                maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: 1600L
-            )
+            val migrated = (prefs[Keys.CALIB_VERSION] ?: 1) >= CURRENT_CALIB_VERSION
+            val defaults = BotConfig()
+            val current = if (!migrated) {
+                defaults
+            } else {
+                BotConfig(
+                    formulaMode = runCatching {
+                        FormulaMode.valueOf(prefs[Keys.FORMULA_MODE] ?: FormulaMode.LINEAR.name)
+                    }.getOrDefault(FormulaMode.LINEAR),
+                    kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
+                    offsetMs = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs,
+                    quadFactor = prefs[Keys.QUAD_FACTOR] ?: defaults.quadFactor,
+                    pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: defaults.pawnColorRgb,
+                    pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: defaults.pawnColorTolerance,
+                    bgDiffThreshold = prefs[Keys.BG_DIFF_THRESHOLD] ?: defaults.bgDiffThreshold,
+                    roiTopFraction = prefs[Keys.ROI_TOP_FRACTION] ?: defaults.roiTopFraction,
+                    roiBottomFraction = prefs[Keys.ROI_BOTTOM_FRACTION] ?: defaults.roiBottomFraction,
+                    tapXFraction = prefs[Keys.TAP_X_FRACTION] ?: defaults.tapXFraction,
+                    tapYFraction = prefs[Keys.TAP_Y_FRACTION] ?: defaults.tapYFraction,
+                    jumpCooldownMs = prefs[Keys.JUMP_COOLDOWN_MS] ?: defaults.jumpCooldownMs,
+                    minPressMs = prefs[Keys.MIN_PRESS_MS] ?: defaults.minPressMs,
+                    maxPressMs = prefs[Keys.MAX_PRESS_MS] ?: defaults.maxPressMs
+                )
+            }
             val updated = transform(current)
+            prefs[Keys.CALIB_VERSION] = CURRENT_CALIB_VERSION
             prefs[Keys.FORMULA_MODE] = updated.formulaMode.name
             prefs[Keys.K_FACTOR] = updated.kFactor
             prefs[Keys.OFFSET_MS] = updated.offsetMs

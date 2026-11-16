@@ -83,4 +83,37 @@ class BlockVisionAnalyzerTest {
         // 0.001 * 200^2 + 1.0 * 200 + 20 = 40 + 200 + 20 = 260ms
         assertEquals(260L, BlockVisionAnalyzer.computeDurationMs(200f, quadCfg))
     }
+
+    @Test
+    fun `lighter pawn head with visible collar and cone does not falsely project baseY downward`() {
+        val config = BotConfig()
+        val fullBmp = BlockVisionAnalyzer.generateSyntheticTestFrame(
+            width = 720,
+            height = 1280,
+            pawnColorRgb = config.pawnColorRgb,
+            targetBlockWidthPx = 220f,
+            distanceFactor = 0.72f
+        )
+        // Repaint only the sphere head lighter (#625B84) while keeping the collar and cone intact
+        val painted = fullBmp.copy(android.graphics.Bitmap.Config.ARGB_8888, true)
+        fullBmp.recycle()
+        val canvas = android.graphics.Canvas(painted)
+        val lightHeadPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(98, 91, 132)
+        }
+        val curCx = 720f * 0.28f
+        val curCy = 1280f * 0.63f
+        canvas.drawCircle(curCx, curCy - 72f, 13f, lightHeadPaint)
+
+        val result = BlockVisionAnalyzer.analyze(painted, config)
+        painted.recycle()
+
+        assertTrue("Pawn should still lock via cone and golden collar", result.pawnFound)
+        assertTrue("Target block should still be found", result.blockFound)
+        // Standing foot is around curCy - 6 (~800px), not projected down by +60px into block side
+        assertTrue(
+            "pawnBaseY should stay near pawn foot (~790..815), not falsely projected downward; got ${result.pawnBaseY}",
+            result.pawnBaseY in 780f..820f
+        )
+    }
 }

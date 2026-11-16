@@ -40,6 +40,7 @@ class JumpAccessibilityService : AccessibilityService() {
         val clampedDuration = durationMs.coerceIn(50L, 4000L)
         val path = Path().apply {
             moveTo(x, y)
+            lineTo(x + 1f, y + 1f)
         }
         val stroke = GestureDescription.StrokeDescription(path, 0L, clampedDuration)
         val gesture = GestureDescription.Builder()

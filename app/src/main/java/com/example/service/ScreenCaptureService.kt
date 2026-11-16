@@ -219,11 +219,15 @@ class ScreenCaptureService : Service() {
             while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
                 delay(150L)
                 val nextResult = analyzeLatestFrame(config, overlayRect)
+                val prevW = stableResult.blockBounds?.widthPx ?: 0f
+                val nextW = nextResult?.blockBounds?.widthPx ?: 0f
                 if (nextResult != null &&
                     stableResult.pawnFound && nextResult.pawnFound &&
                     stableResult.blockFound && nextResult.blockFound &&
                     kotlin.math.abs(stableResult.rawDistancePx - nextResult.rawDistancePx) <= 8f &&
-                    kotlin.math.abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 6f
+                    kotlin.math.abs(stableResult.pawnCenterX - nextResult.pawnCenterX) <= 6f &&
+                    kotlin.math.abs(stableResult.pawnBaseY - nextResult.pawnBaseY) <= 6f &&
+                    kotlin.math.abs(prevW - nextW) <= 12f
                 ) {
                     stableResult = nextResult
                     break

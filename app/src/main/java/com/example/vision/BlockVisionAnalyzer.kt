@@ -29,6 +29,8 @@ object BlockVisionAnalyzer {
         val maxX: Int,
         val minY: Int,
         val maxY: Int,
+        val collarHits: Int,
+        val collarCenterY: Float,
         val score: Int
     )
 
@@ -132,9 +134,18 @@ object BlockVisionAnalyzer {
         val pawnTopY = p05Y.toFloat()
         val observedHeight = (p95Y - p05Y).toFloat()
         val expectedPawnHeight = width * 0.164f
-        val pawnBaseY = if (observedHeight < expectedPawnHeight * 0.72f) {
-            // Pawn lower body is occluded behind a tall foreground block; project true base from head top
-            (pawnTopY + expectedPawnHeight).coerceAtMost(roiBottom.toFloat())
+        val coneVisibleBelowCollar = pawn.collarHits >= 3 &&
+            pawn.collarCenterY > 0f &&
+            (p95Y - pawn.collarCenterY) >= (width * 0.052f)
+        val isBottomOccluded = !coneVisibleBelowCollar && observedHeight < expectedPawnHeight * 0.72f
+        val pawnBaseY = if (isBottomOccluded) {
+            // Pawn lower cone is genuinely occluded behind a tall foreground block (e.g., roof/chest);
+            // project true resting foot from the golden collar or head top.
+            if (pawn.collarHits >= 3 && pawn.collarCenterY > 0f) {
+                (pawn.collarCenterY + width * 0.095f).coerceAtMost(roiBottom.toFloat())
+            } else {
+                (pawnTopY + expectedPawnHeight).coerceAtMost(roiBottom.toFloat())
+            }
         } else {
             p95Y.toFloat()
         }
@@ -381,7 +392,8 @@ object BlockVisionAnalyzer {
                 }
             }
 
-            if (compXs.size < 6) continue
+            val minPawnPixels = max(24, (width * height) / 42000)
+            if (compXs.size < minPawnPixels) continue
 
             val compW = maxX - minX
             val compH = maxY - minY
@@ -392,6 +404,7 @@ object BlockVisionAnalyzer {
 
             // Check for warm gold collar signature near this component
             var collarHits = 0
+            var collarSumY = 0L
             val scanMinX = (minX - 6).coerceIn(marginX, width - marginX - 1)
             val scanMaxX = (maxX + 6).coerceIn(marginX, width - marginX - 1)
             val scanMinY = (minY - roiTop - 10).coerceIn(0, roiHeight - 1)
@@ -407,11 +420,18 @@ object BlockVisionAnalyzer {
                     val b = px and 0xFF
                     if (r > 160 && g > 115 && b < 130 && (r - b) > 50) {
                         collarHits++
+                        collarSumY += (roiTop + cy)
                     }
                     cx += 2
                 }
                 cy += 2
             }
+
+            // Reject tiny UI artifacts / Game Over buttons / screen-edge modal cards lacking a golden collar
+            val clippedAtRoiBottom = maxY >= roiTop + roiHeight - 3
+            val extremeSideMargin = (minX + maxX) * 0.5f < width * 0.10f || (minX + maxX) * 0.5f > width * 0.90f
+            if (collarHits < 2 && compXs.size < max(75, width / 8)) continue
+            if (collarHits < 3 && (clippedAtRoiBottom || extremeSideMargin)) continue
 
             var score = compXs.size.coerceAtMost(2800)
             if (compW <= width * 0.09f) score += 1200
@@ -419,7 +439,18 @@ object BlockVisionAnalyzer {
             if (collarHits >= 3) score += 6000
             if (compW > width * 0.105f) score -= 3000
 
-            val candidate = PawnCandidate(compXs, compYs, minX, maxX, minY, maxY, score)
+            val collarCenterY = if (collarHits > 0) collarSumY.toFloat() / collarHits else -1f
+            val candidate = PawnCandidate(
+                xs = compXs,
+                ys = compYs,
+                minX = minX,
+                maxX = maxX,
+                minY = minY,
+                maxY = maxY,
+                collarHits = collarHits,
+                collarCenterY = collarCenterY,
+                score = score
+            )
             if (bestCandidate == null || candidate.score > bestCandidate.score) {
                 bestCandidate = candidate
             }
