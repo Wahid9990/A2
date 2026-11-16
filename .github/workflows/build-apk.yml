@@ -54,17 +54,24 @@ jobs:
           if-no-files-found: error
 
       - name: Build Release APK (when keystore secrets are configured)
-        if: ${{ secrets.KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+        id: release_build
         env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PATH: ${{ github.workspace }}/release-upload-key.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$KEYSTORE_PATH"
-          gradle :app:assembleRelease
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+            gradle :app:assembleRelease
+            echo "built=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release keystore secrets not configured; skipping release APK."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload Release APK
-        if: ${{ secrets.KEYSTORE_BASE64 != '' && secrets.STORE_PASSWORD != '' && secrets.KEY_PASSWORD != '' }}
+        if: steps.release_build.outputs.built == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: JumpAssist-release-apk
