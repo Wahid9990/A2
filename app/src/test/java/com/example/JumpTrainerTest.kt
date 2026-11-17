@@ -384,4 +384,30 @@ class JumpTrainerTest {
         assertTrue("Report must log stance S=SIDE_FRONT", report.contains("S=SIDE_FRONT"))
         assertTrue("Report must log target profile NARROW:BLUE", report.contains("NARROW:BLUE"))
     }
+
+    @Test
+    fun `MINI block learns distinct power bias quickly with minimal global k distortion`() {
+        val baseCfg = BotConfig(kFactor = 1.38f, offsetMs = 40f, autoTrainEnabled = true)
+
+        val (afterMiniShort, note) = JumpTrainer.applyOnlineUpdate(
+            config = baseCfg,
+            dNorm = 390f,
+            holdMs = 578L,
+            outcome = JumpOutcome.SHORT,
+            landingRatio = 0.82f,
+            history = emptyList(),
+            targetProfile = "MINI",
+            targetColorGroup = "WHITE",
+            pawnStance = "CENTER"
+        )
+
+        val miniBias = JumpTrainer.computeContextAdjustmentMs(afterMiniShort, 390f, "MINI", "WHITE", "CENTER")
+        val medBias = JumpTrainer.computeContextAdjustmentMs(afterMiniShort, 390f, "MEDIUM", "WHITE", "CENTER")
+        assertTrue("MINI short jump must build strong +MINI bias ($note), got $miniBias", miniBias >= 30L)
+        assertEquals("MEDIUM block must stay clean of MINI bias", 0L, medBias)
+        assertTrue(
+            "Global kFactor must shift very gently on MINI specialty block (1.38 -> ${afterMiniShort.kFactor})",
+            kotlin.math.abs(afterMiniShort.kFactor - baseCfg.kFactor) <= 0.03f
+        )
+    }
 }

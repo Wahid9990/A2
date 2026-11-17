@@ -159,9 +159,14 @@ object JumpTrainer {
         val isFatalOut = outcome == JumpOutcome.OUT_SHORT ||
             outcome == JumpOutcome.OUT_OVERSHOOT ||
             outcome == JumpOutcome.OUT_UNKNOWN
+        val isMiniBlock = targetProfile == "MINI"
         val isSpecialtyContext = targetProfile != "MEDIUM" ||
             (pawnStance != "CENTER" && pawnStance != "UNKNOWN")
-        val globalShare = if (isSpecialtyContext) 0.35f else 1.0f
+        val globalShare = when {
+            isMiniBlock -> 0.18f
+            isSpecialtyContext -> 0.35f
+            else -> 1.0f
+        }
         var allowLargeRecovery = false
         var note = "Keep"
         var learnedErrorMs = 0f
@@ -290,12 +295,22 @@ object JumpTrainer {
 
         // Propagate contextual bias to Block Shape, Block Color Signature, Pawn Stance, and Spot Mistake Guard
         if (abs(learnedErrorMs) >= 3f) {
-            val ctxWeight = if (isSpecialtyContext) 0.72f else 0.28f
+            val ctxWeight = when {
+                isMiniBlock -> 0.90f
+                isSpecialtyContext -> 0.72f
+                else -> 0.28f
+            }
             val ctxDelta = learnedErrorMs * ctxWeight
 
-            val blkShare = if (stKey.isNotEmpty() && pawnStance != "CENTER") 0.45f else 0.65f
+            val blkShare = when {
+                isMiniBlock && (stKey.isEmpty() || pawnStance == "CENTER") -> 0.78f
+                isMiniBlock -> 0.55f
+                stKey.isNotEmpty() && pawnStance != "CENTER" -> 0.45f
+                else -> 0.65f
+            }
+            val blkCap = if (isMiniBlock) 110f else 90f
             val curBlk = newBiases[pKey] ?: 0f
-            newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-90f, 90f)
+            newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-blkCap, blkCap)
 
             if (sKey.isNotEmpty()) {
                 val curSig = newBiases[sKey] ?: 0f
@@ -394,9 +409,10 @@ object JumpTrainer {
 
         val updatedBiases = LinkedHashMap(config.adaptiveBiasesMs)
         if (lastRecord != null) {
-            val ctxShift = deltaHoldMs * 0.55f
+            val ctxShift = deltaHoldMs * if (lastRecord.targetProfile == "MINI") 0.75f else 0.55f
             val pKey = profileKey(lastRecord.targetProfile)
-            updatedBiases[pKey] = ((updatedBiases[pKey] ?: 0f) + ctxShift * 0.50f).coerceIn(-90f, 90f)
+            val blkCap = if (lastRecord.targetProfile == "MINI") 110f else 90f
+            updatedBiases[pKey] = ((updatedBiases[pKey] ?: 0f) + ctxShift * 0.55f).coerceIn(-blkCap, blkCap)
             val sKey = signatureKey(lastRecord.targetProfile, lastRecord.targetColorGroup)
             if (sKey.isNotEmpty()) {
                 updatedBiases[sKey] = ((updatedBiases[sKey] ?: 0f) + ctxShift * 0.35f).coerceIn(-75f, 75f)

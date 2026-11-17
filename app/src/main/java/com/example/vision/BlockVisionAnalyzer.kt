@@ -178,8 +178,8 @@ object BlockVisionAnalyzer {
 
         // Step 2: Three-pass target block detection (opaque, translucent/glass, and subtle background-matching blocks)
         val minRunLength = max(6, (width * 0.014f).roundToInt())
-        val minValidBlockWidth = max(72, (width * 0.150f).roundToInt())
-        val minValidBlockHeight = max(24, (height * 0.020f).roundToInt())
+        val minValidBlockWidth = max(56, (width * 0.095f).roundToInt())
+        val minValidBlockHeight = max(22, (height * 0.015f).roundToInt())
         val translucentThreshold = max(12, (config.bgDiffThreshold * 0.36f).roundToInt())
         val translucentThresholdSq = translucentThreshold * translucentThreshold * 3
         val subtleThreshold = max(8, (config.bgDiffThreshold * 0.24f).roundToInt())
@@ -217,7 +217,8 @@ object BlockVisionAnalyzer {
                 excludedRect = excludedRect,
                 roiTop = roiTop,
                 baseBlock = block,
-                translucentThresholdSq = translucentThresholdSq
+                translucentThresholdSq = translucentThresholdSq,
+                minValidBlockWidth = minValidBlockWidth
             )
         } else {
             // Pass 2: Translucent / chromatic low-contrast block fallback (rejecting neutral drop shadows & smooth sky glow)
@@ -761,8 +762,13 @@ object BlockVisionAnalyzer {
                 allowShadowLeftOffset = allowShadowLeftOffset
             )
 
+            val effectiveMinHeight = if (traced.maxTopWidth < (width * 0.145f).roundToInt()) {
+                max(minValidBlockHeight, (traced.maxTopWidth * 0.24f).roundToInt())
+            } else {
+                max(minValidBlockHeight, (width * 0.040f).roundToInt())
+            }
             val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
-                cHeight >= minValidBlockHeight &&
+                cHeight >= effectiveMinHeight &&
                 distFromPawn >= width * 0.15f &&
                 !overlapsPawnBase &&
                 dyAbs >= minVerticalClimb &&
@@ -1031,10 +1037,12 @@ object BlockVisionAnalyzer {
         excludedRect: Rect?,
         roiTop: Int,
         baseBlock: BlockTrace,
-        translucentThresholdSq: Int
+        translucentThresholdSq: Int,
+        minValidBlockWidth: Int
     ): BlockTrace {
-        val searchStart = (baseBlock.apexY - (baseBlock.maxTopWidth * 0.42f).roundToInt()).coerceAtLeast(0)
-        val probeHalfW = (baseBlock.maxTopWidth * 0.35f).roundToInt().coerceAtLeast(16)
+        val climbAllowance = max((baseBlock.maxTopWidth * 0.75f).roundToInt(), (width * 0.08f).roundToInt())
+        val searchStart = (baseBlock.apexY - climbAllowance).coerceAtLeast(0)
+        val probeHalfW = max((baseBlock.maxTopWidth * 0.75f).roundToInt(), (width * 0.11f).roundToInt())
         val centerX = ((baseBlock.widestLeftX + baseBlock.widestRightX) / 2f).roundToInt()
         val scanMinX = (centerX - probeHalfW).coerceAtLeast(marginX)
         val scanMaxX = (centerX + probeHalfW).coerceAtMost(width - marginX - 1)
@@ -1083,6 +1091,7 @@ object BlockVisionAnalyzer {
         if (baseBlock.apexY - newApexY < 6) return baseBlock
 
         val baseCenterX = (baseBlock.widestLeftX + baseBlock.widestRightX) * 0.5f
+        val maxReasonableW = (width * 0.45f).toFloat()
         return traceBlockDownward(
             pixels = pixels,
             width = width,
@@ -1091,15 +1100,14 @@ object BlockVisionAnalyzer {
             marginX = marginX,
             startY = newApexY,
             apexX = newApexX,
-            minValidBlockWidth = max(72, (width * 0.150f).roundToInt()),
+            minValidBlockWidth = minValidBlockWidth,
             excludedRect = excludedRect,
             thresholdSq = translucentThresholdSq,
             rejectDarkShadows = true
         ).let { extended ->
-            val extCenterX = (extended.widestLeftX + extended.widestRightX) * 0.5f
-            val aligned = abs(extCenterX - baseCenterX) <= baseBlock.maxTopWidth * 0.14f
+            val alignedOrHalfWall = baseCenterX in (extended.widestLeftX - 8f)..(extended.widestRightX + 8f)
             val reasonableW = extended.maxTopWidth >= baseBlock.maxTopWidth * 0.92f &&
-                extended.maxTopWidth <= baseBlock.maxTopWidth * 1.12f
+                extended.maxTopWidth <= minOf(maxReasonableW, max(baseBlock.maxTopWidth * 2.35f, width * 0.35f))
             val sharpEdges = hasSharpBoundaryEdge(
                 pixels = pixels,
                 width = width,
@@ -1108,7 +1116,7 @@ object BlockVisionAnalyzer {
                 marginX = marginX,
                 allowShadowLeftOffset = false
             )
-            if (aligned && reasonableW && sharpEdges) extended else baseBlock
+            if (alignedOrHalfWall && reasonableW && sharpEdges) extended else baseBlock
         }
     }
 
@@ -1125,6 +1133,7 @@ object BlockVisionAnalyzer {
 
     private fun classifyBlockProfile(normalizedBlockWidth: Float): String {
         return when {
+            normalizedBlockWidth < 205f -> "MINI"
             normalizedBlockWidth < 330f -> "NARROW"
             normalizedBlockWidth <= 435f -> "MEDIUM"
             else -> "WIDE"
@@ -1195,7 +1204,7 @@ object BlockVisionAnalyzer {
     ): SourcePlatformStance {
         val scanStartRel = (pawnBaseY - roiTop - width * 0.08f).roundToInt().coerceIn(0, roiHeight - 1)
         val scanEndRel = (pawnBaseY - roiTop + width * 0.12f).roundToInt().coerceIn(scanStartRel, roiHeight - 1)
-        val minSrcW = (width * 0.14f).roundToInt()
+        val minSrcW = max((width * 0.095f).roundToInt(), (pawnWidthEstimate * 1.65f).roundToInt())
         val maxSrcW = (width * 0.46f).roundToInt()
         val maxHalfTravel = (width * 0.34f).roundToInt()
         val bridgeHalf = max(16, (pawnWidthEstimate * 0.72f).roundToInt())
