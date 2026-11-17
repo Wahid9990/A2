@@ -499,4 +499,71 @@ class JumpTrainerTest {
             cfg.kFactor - updated.kFactor <= 0.0221f
         )
     }
+
+    @Test
+    fun `scoreDelta combo locks calibration and +1pt off-center warning actively trims toward bullseye`() {
+        val cfg = BotConfig(kFactor = 1.365f, offsetMs = 49f, autoTrainEnabled = true)
+
+        // +4pt combo: even if vision landingRatio has slight 0.95 noise, do not disturb calibration
+        val (comboCfg, comboNote) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 480f,
+            holdMs = 704L,
+            outcome = JumpOutcome.CENTER,
+            landingRatio = 0.95f,
+            history = emptyList(),
+            targetProfile = "MEDIUM",
+            targetColorGroup = "WHITE",
+            pawnStance = "CENTER",
+            scoreDelta = 4
+        )
+        assertEquals("Combo +4 must keep kFactor untouched ($comboNote)", cfg.kFactor, comboCfg.kFactor, 0.0001f)
+        assertEquals("Combo +4 must keep offsetMs untouched ($comboNote)", cfg.offsetMs, comboCfg.offsetMs, 0.01f)
+
+        // +1pt single point: r=0.98 used to be ignored as Dead center; now actively trimmed toward 1.00
+        val (edgeCfg, edgeNote) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 480f,
+            holdMs = 704L,
+            outcome = JumpOutcome.CENTER,
+            landingRatio = 0.98f,
+            history = emptyList(),
+            targetProfile = "MEDIUM",
+            targetColorGroup = "WHITE",
+            pawnStance = "CENTER",
+            scoreDelta = 1
+        )
+        assertTrue("+1pt warning at r=0.98 must trim kFactor upward ($edgeNote)", edgeCfg.kFactor > cfg.kFactor)
+        assertTrue("+1pt note should flag Edge +1pt ($edgeNote)", edgeNote.contains("Edge +1pt"))
+
+        // 0pt while still alive with pawnFound=true classifies as SHORT
+        val pre = makeResult(px = 218f, py = 954f, bx = 548f, by = 755f, dRaw = 385f, dNorm = 577f)
+        val postSame = makeResult(px = 225f, py = 950f, bx = 548f, by = 755f)
+        assertEquals(
+            "0 score delta while alive must classify as SHORT",
+            JumpOutcome.SHORT,
+            JumpTrainer.classifyOutcome(pre, landingRatio = 0.55f, postSettled = postSame, scoreDelta = 0)
+        )
+    }
+
+    @Test
+    fun `MINI block OUT_UNKNOWN near nominal k does not falsely fire -40ms out-over recovery`() {
+        // Reproduces log #94: k=1.365 b=49 dNorm=446 hold=667 effK=1.495 on MINI:PURPLE with r=1.02
+        val cfg = BotConfig(kFactor = 1.365f, offsetMs = 49f, autoTrainEnabled = true)
+        val (updated, note) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 446f,
+            holdMs = 667L,
+            outcome = JumpOutcome.OUT_UNKNOWN,
+            landingRatio = 1.02f,
+            history = emptyList(),
+            targetProfile = "MINI",
+            targetColorGroup = "PURPLE",
+            pawnStance = "SIDE_BACK"
+        )
+        assertTrue("MINI OUT_UNKNOWN at k=1.365 must not fire Out-over recovery ($note)", !note.contains("Out-over recovery"))
+        val mistBias = updated.adaptiveBiasesMs["MIST:MINI:SIDE_BACK:d450"] ?: 0f
+        assertTrue("Near-rim MINI guard should stay gentle (>= -25ms), got $mistBias ($note)", mistBias >= -25f)
+    }
 }
+

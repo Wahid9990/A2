@@ -627,7 +627,15 @@ class ScreenCaptureService : Service() {
         delay(remainingCooldown)
         val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
 
-        val outcome = JumpTrainer.classifyOutcome(stableResult, landingRatio, postSettled)
+        val preScore = stableResult.scoreReading
+        val postScore = postSettled?.scoreReading
+        val scoreDelta = if (preScore != null && postScore != null && postScore >= preScore && (postScore - preScore) <= 64) {
+            postScore - preScore
+        } else {
+            null
+        }
+
+        val outcome = JumpTrainer.classifyOutcome(stableResult, landingRatio, postSettled, scoreDelta)
         val existingHistory = AutomationBridge.trainingRecords.value
         val activeCfg = AutomationBridge.currentConfig.value
         val userOverrodeMidJump = manualConfigEpoch != startManualEpoch
@@ -643,13 +651,15 @@ class ScreenCaptureService : Service() {
                 history = existingHistory,
                 targetProfile = stableResult.targetBlockProfile,
                 targetColorGroup = stableResult.targetColorGroup,
-                pawnStance = stableResult.pawnStance
+                pawnStance = stableResult.pawnStance,
+                scoreDelta = scoreDelta
             )
         }
 
         val blk = stableResult.blockBounds!!
         val ratioSummary = landingRatio?.let { String.format(Locale.US, "r=%.2f", it) } ?: "r=NA"
-        val banner = "${outcome.shortLabel} ($ratioSummary) · ${stableResult.targetBlockProfile.take(3)}/${stableResult.pawnStance.take(4)}"
+        val ptSummary = scoreDelta?.let { " +${it}pt" } ?: ""
+        val banner = "${outcome.shortLabel} ($ratioSummary$ptSummary) · ${stableResult.targetBlockProfile.take(3)}/${stableResult.pawnStance.take(4)}"
         val record = JumpTelemetryRecord(
             id = AutomationBridge.nextRecordId(),
             timestamp = AutomationBridge.currentTimeStr(),
@@ -680,7 +690,8 @@ class ScreenCaptureService : Service() {
             sourceWidthPx = stableResult.sourceWidthPx,
             targetProfile = stableResult.targetBlockProfile,
             targetColorGroup = stableResult.targetColorGroup,
-            appliedBiasMs = stableResult.appliedContextBiasMs
+            appliedBiasMs = stableResult.appliedContextBiasMs,
+            scoreDelta = scoreDelta
         )
 
         AutomationBridge.prependTrainingRecord(record, banner)

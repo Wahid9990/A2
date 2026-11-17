@@ -151,4 +151,29 @@ class RealGameScreenshotTest {
         assertTrue("Medium tier should be in 240..590ms, got $medium", medium in 240L..590L)
         assertTrue("Thoughtful pause tier should be in 680..1280ms, got $slow", slow in 680L..1280L)
     }
+
+    @Test
+    fun `reads top-right golden score digits accurately on real screenshots`() {
+        data class ScoreCase(val path: String, val expected: Int, val hud: Rect?)
+        val cases = listOf(
+            ScoreCase("public/assets/aistudio/Screenshot_20261116_084330_4fd83fcee830ed007aacc9cec66270f7_41ad5824.jpg", 47, Rect(30, 280, 490, 475)),
+            ScoreCase("public/assets/aistudio/Screenshot_20261116_211831_4fd83fcee830ed007aacc9cec66270f7_46c588a8.jpg", 153, Rect(30, 110, 420, 405)),
+            ScoreCase("public/assets/aistudio/Screenshot_20261116_215020_4fd83fcee830ed007aacc9cec66270f7_3eefc20f.jpg", 114, null),
+            ScoreCase("public/assets/aistudio/Screenshot_20261116_223218_4fd83fcee830ed007aacc9cec66270f7_2fb0f917.jpg", 107, Rect(30, 145, 455, 430)),
+            ScoreCase("public/assets/aistudio/Screenshot_20261117_060923_4fd83fcee830ed007aacc9cec66270f7_32305e80.jpg", 75, null),
+            ScoreCase("public/assets/aistudio/Screenshot_20261117_193305_4fd83fcee830ed007aacc9cec66270f7_aca36631.jpg", 91, Rect(30, 145, 455, 430)),
+            ScoreCase("public/assets/aistudio/Screenshot_20261117_192934_4fd83fcee830ed007aacc9cec66270f7_5a4db4ae.jpg", 32, Rect(30, 145, 455, 430))
+        )
+        val failures = ArrayList<String>()
+        for (c in cases) {
+            val bmp = loadWorkspaceImageOrSkip(c.path)
+            val actual = BlockVisionAnalyzer.analyze(bmp, BotConfig(), excludedRect = c.hud).scoreReading
+            println("SCORE OCR [${c.expected}] => $actual")
+            if (c.expected != actual) {
+                failures.add("${c.expected} != $actual")
+            }
+        }
+        assertTrue("Score mismatches: $failures", failures.isEmpty())
+    }
 }
+

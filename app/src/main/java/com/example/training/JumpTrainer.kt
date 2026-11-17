@@ -99,7 +99,8 @@ object JumpTrainer {
     fun classifyOutcome(
         pre: VisionAnalysisResult,
         landingRatio: Float?,
-        postSettled: VisionAnalysisResult?
+        postSettled: VisionAnalysisResult?,
+        scoreDelta: Int? = null
     ): JumpOutcome {
         if (postSettled != null && !postSettled.pawnFound) {
             return when {
@@ -107,6 +108,16 @@ object JumpTrainer {
                 landingRatio != null && landingRatio > 1.06f -> JumpOutcome.OUT_OVERSHOOT
                 else -> JumpOutcome.OUT_UNKNOWN
             }
+        }
+
+        // Exact score confirmation from top-right counter:
+        // 0 pts while still alive means pawn never reached the next block (stayed on source).
+        if (scoreDelta == 0 && postSettled?.pawnFound == true && (landingRatio == null || landingRatio < 1.06f)) {
+            return JumpOutcome.SHORT
+        }
+        // >=2 pts means dead-center bullseye combo (+2, +4, +6, +8...) was awarded.
+        if (scoreDelta != null && scoreDelta >= 2 && postSettled?.pawnFound == true) {
+            return JumpOutcome.CENTER
         }
 
         if (landingRatio != null) {
@@ -152,7 +163,8 @@ object JumpTrainer {
         history: List<JumpTelemetryRecord>,
         targetProfile: String = "MEDIUM",
         targetColorGroup: String = "",
-        pawnStance: String = "CENTER"
+        pawnStance: String = "CENTER",
+        scoreDelta: Int? = null
     ): Pair<BotConfig, String> {
         if (!config.autoTrainEnabled || dNorm < 80f) {
             return config to "Self-train skipped"
@@ -181,7 +193,23 @@ object JumpTrainer {
         val stKey = stanceKey(pawnStance)
         val mKey = mistakeKey(targetProfile, pawnStance, dNorm)
 
+        val comboConfirmed = !isFatalOut && scoreDelta != null && scoreDelta >= 2
+        val singlePointOffCenter = !isFatalOut && scoreDelta == 1
+
         when {
+            comboConfirmed -> {
+                // +2/+4/+6/+8 combo proves dead-center bullseye: lock calibration & resist ratio noise.
+                val ratioTag = landingRatio?.let { String.format(Locale.US, " (r=%.2f)", it) } ?: ""
+                note = String.format(Locale.US, "Combo +%d center%s", scoreDelta, ratioTag)
+                val wonMist = newBiases[mKey]
+                if (wonMist != null && abs(wonMist) >= 4f) {
+                    if (targetProfile != "MEDIUM") {
+                        newBiases[pKey] = ((newBiases[pKey] ?: 0f) + wonMist * 0.20f).coerceIn(-80f, 80f)
+                    }
+                    newBiases[mKey] = (wonMist * 0.75f)
+                }
+            }
+
             outcome == JumpOutcome.OUT_SHORT -> {
                 if (landingRatio != null && landingRatio in 0.45f..0.95f) {
                     val safeRatio = landingRatio.coerceIn(0.72f, 0.92f)
@@ -228,16 +256,21 @@ object JumpTrainer {
                         abs(it.normalizedDistancePx - dNorm) <= 45f
                 }
                 val existingMist = newBiases[mKey] ?: 0f
+                val isRunawayHighK = config.kFactor > ANCHOR_K + 0.08f ||
+                    (!isMiniBlock && dNorm >= 260f && effK > ANCHOR_K + 0.12f) ||
+                    (isMiniBlock && effK > ANCHOR_K + 0.28f)
+                val isRunawayLowK = config.kFactor < ANCHOR_K - 0.12f ||
+                    (!isMiniBlock && dNorm >= 260f && effK < ANCHOR_K - 0.14f)
 
                 when {
-                    effK > ANCHOR_K + 0.08f || config.kFactor > ANCHOR_K + 0.08f -> {
+                    isRunawayHighK -> {
                         val pull = ((config.kFactor - ANCHOR_K) * 0.45f).coerceIn(0.055f, 0.14f)
                         newK -= pull * globalShare
                         newB -= if (prevSameSpot != null) 8f * globalShare else 4f * globalShare
                         learnedErrorMs = -40f
                         note = String.format(Locale.US, "Out-over recovery (-%.3f k)", pull)
                     }
-                    effK < ANCHOR_K - 0.12f || config.kFactor < ANCHOR_K - 0.12f -> {
+                    isRunawayLowK -> {
                         val pull = ((ANCHOR_K - config.kFactor) * 0.45f).coerceIn(0.055f, 0.14f)
                         newK += pull * globalShare
                         newB += if (prevSameSpot != null) 8f * globalShare else 4f * globalShare
@@ -245,10 +278,13 @@ object JumpTrainer {
                         note = String.format(Locale.US, "Out-short recovery (+%.3f k)", pull)
                     }
                     else -> {
+                        val nearRim = landingRatio != null && landingRatio in 0.96f..1.04f
+                        val rimStep = if (isMiniBlock) 18f else 24f
                         // Never repeat the exact same failed hold: prefer pre-fall ratio direction, then stance / history
                         val guardDelta = when {
                             existingMist <= -65f -> 46f // previous downward guards still missed, flip to avoid trap
                             existingMist >= 65f -> -46f
+                            nearRim -> if ((landingRatio ?: 1f) < 1.0f) rimStep else -rimStep
                             landingRatio != null && landingRatio < 0.97f -> 38f
                             landingRatio != null && landingRatio > 1.03f -> -38f
                             pawnStance == "SIDE_BACK" -> 38f
@@ -257,7 +293,7 @@ object JumpTrainer {
                             else -> -36f
                         }
                         learnedErrorMs = guardDelta
-                        newK += (guardDelta * 0.25f) / dNorm.coerceAtLeast(150f)
+                        newK += (guardDelta * 0.25f * globalShare) / dNorm.coerceAtLeast(150f)
                         note = String.format(Locale.US, "Mistake guard (%+.0fms on %s/%s)", guardDelta, targetProfile, pawnStance)
                     }
                 }
@@ -265,39 +301,53 @@ object JumpTrainer {
 
             landingRatio != null && landingRatio < 0.72f -> {
                 // Survived with r < 0.72 => camera already panned back before burst captured pawn
-                note = String.format(Locale.US, "Pan-drifted (r=%.2f ignored)", landingRatio)
+                note = if (singlePointOffCenter) {
+                    String.format(Locale.US, "Edge +1pt (pan r=%.2f skipped)", landingRatio)
+                } else {
+                    String.format(Locale.US, "Pan-drifted (r=%.2f ignored)", landingRatio)
+                }
             }
 
             landingRatio != null && landingRatio in 0.72f..1.65f -> {
                 val errorRatio = 1.0f - landingRatio
-                if (abs(errorRatio) <= 0.025f) {
-                    note = String.format(Locale.US, "Dead center (r=%.2f)", landingRatio)
-                    // Reinforce winning mistake guard into permanent block/stance bias cleanly
-                    val wonMist = newBiases[mKey]
-                    if (wonMist != null && abs(wonMist) >= 4f) {
-                        newBiases[pKey] = ((newBiases[pKey] ?: 0f) + wonMist * 0.20f).coerceIn(-80f, 80f)
-                        newBiases[mKey] = (wonMist * 0.80f)
+                val deadCenterTol = if (singlePointOffCenter) 0.008f else 0.025f
+                if (abs(errorRatio) <= deadCenterTol) {
+                    if (singlePointOffCenter) {
+                        note = String.format(Locale.US, "Edge +1pt (r=%.2f)", landingRatio)
+                    } else {
+                        note = String.format(Locale.US, "Dead center (r=%.2f)", landingRatio)
+                        val wonMist = newBiases[mKey]
+                        if (wonMist != null && abs(wonMist) >= 4f) {
+                            if (targetProfile != "MEDIUM") {
+                                newBiases[pKey] = ((newBiases[pKey] ?: 0f) + wonMist * 0.20f).coerceIn(-80f, 80f)
+                            }
+                            newBiases[mKey] = (wonMist * 0.80f)
+                        }
                     }
                 } else {
                     val safeRatio = landingRatio.coerceIn(0.76f, 1.36f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
                     val gain = when {
+                        singlePointOffCenter -> if (outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER) 0.34f else 0.30f
                         abs(errorRatio) <= 0.060f -> 0.18f
                         outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER -> 0.34f
                         else -> 0.26f
                     }
                     // Prevent a single noisy jump (especially at short D) from slashing k/STANCE
-                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * gain).coerceIn(-28f, 28f)
+                    var deltaMs = ((idealHoldMs - holdMs.toFloat()) * gain).coerceIn(-28f, 28f)
+                    if (singlePointOffCenter && abs(deltaMs) < 6f) {
+                        deltaMs = if (errorRatio > 0f) 6f else -6f
+                    }
                     learnedErrorMs = deltaMs
                     val shortDistDamp = if (dNorm < 280f) 0.55f else 1.0f
 
                     newK += ((deltaMs * globalShare * shortDistDamp) * 0.80f) / dNorm.coerceAtLeast(180f)
                     newB += (deltaMs * globalShare) * 0.20f
-                    note = if (abs(errorRatio) <= 0.045f) {
-                        String.format(Locale.US, "Center trim r=%.2f Δ=%.0fms", landingRatio, deltaMs)
-                    } else {
-                        String.format(Locale.US, "LMS r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                    note = when {
+                        singlePointOffCenter -> String.format(Locale.US, "Edge +1pt trim r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                        abs(errorRatio) <= 0.045f -> String.format(Locale.US, "Center trim r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                        else -> String.format(Locale.US, "LMS r=%.2f Δ=%.0fms", landingRatio, deltaMs)
                     }
                 }
             }
@@ -307,6 +357,10 @@ object JumpTrainer {
                 newK += 0.014f * globalShare
                 newB += 4f * globalShare
                 note = "Short fallback (+k,+b)"
+            }
+
+            singlePointOffCenter -> {
+                note = "Edge +1pt (r=NA)"
             }
         }
 
@@ -356,7 +410,7 @@ object JumpTrainer {
         }
 
         // Damped 2-parameter OLS blend ONLY over clean STANDARD (CENTER + MEDIUM) jumps
-        val validForOls = !isFatalOut && !isSpecialtyContext && (landingRatio == null || landingRatio >= 0.72f)
+        val validForOls = !isFatalOut && !comboConfirmed && !isSpecialtyContext && (landingRatio == null || landingRatio >= 0.72f)
         if (validForOls) {
             val fitSamples = history.asSequence()
                 .takeWhile { it.outcome != JumpOutcome.USER_SHORT && it.outcome != JumpOutcome.USER_LONG }
@@ -564,10 +618,11 @@ object JumpTrainer {
                 val biasTag = if (r.appliedBiasMs != 0L) String.format(Locale.US, "(%+d)", r.appliedBiasMs) else ""
                 val stanceTag = String.format(Locale.US, "S=%s(%.2f,sw=%.0f)", r.pawnStance, r.stanceOffsetFrac, r.sourceWidthPx)
                 val targetTag = if (r.targetColorGroup.isNotEmpty()) "${r.targetProfile}:${r.targetColorGroup}" else r.targetProfile
+                val ptTag = r.scoreDelta?.let { " pt=+$it" } ?: ""
                 sb.appendLine(
                     String.format(
                         Locale.US,
-                        "#%d %s %s D=%.0f(n=%.0f) hold=%dms%s r=%s P=(%.0f,%.0f,%dpx) %s B=(%.0f,%.0f,w=%.0f,%s) k=%.3f->%.3f b=%.0f->%.0f rgb=[%s,%s,%s]%s %s",
+                        "#%d %s %s D=%.0f(n=%.0f) hold=%dms%s r=%s%s P=(%.0f,%.0f,%dpx) %s B=(%.0f,%.0f,w=%.0f,%s) k=%.3f->%.3f b=%.0f->%.0f rgb=[%s,%s,%s]%s %s",
                         r.id,
                         r.timestamp,
                         r.outcome.shortLabel,
@@ -576,6 +631,7 @@ object JumpTrainer {
                         r.holdMs,
                         biasTag,
                         ratioStr,
+                        ptTag,
                         r.pawnX,
                         r.pawnY,
                         r.pawnPixels,

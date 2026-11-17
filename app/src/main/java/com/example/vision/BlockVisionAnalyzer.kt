@@ -168,6 +168,8 @@ object BlockVisionAnalyzer {
             )
         }
 
+        val scoreReading = ScoreDigitReader.readScore(bitmap, excludedRect)
+
         val sortedXs = pawn.xs.sorted()
         val sortedYs = pawn.ys.sorted()
         val p10X = sortedXs[(sortedXs.size * 0.10f).toInt().coerceIn(0, sortedXs.lastIndex)]
@@ -309,7 +311,8 @@ object BlockVisionAnalyzer {
                 computedDurationMs = 0L,
                 safeMarginMs = 0L,
                 analysisTimeMs = elapsedMs,
-                statusMessage = "Pawn locked at (${pawnCenterX.roundToInt()}, ${pawnBaseY.roundToInt()}), but next block not found."
+                statusMessage = "Pawn locked at (${pawnCenterX.roundToInt()}, ${pawnBaseY.roundToInt()}), but next block not found.",
+                scoreReading = scoreReading
             )
         }
 
@@ -411,7 +414,8 @@ object BlockVisionAnalyzer {
             pawnStanceOffsetFrac = sourceStance.offsetFrac,
             targetBlockProfile = targetBlockProfile,
             targetColorGroup = targetColorGroup,
-            appliedContextBiasMs = contextBiasMs
+            appliedContextBiasMs = contextBiasMs,
+            scoreReading = scoreReading
         )
     }
 

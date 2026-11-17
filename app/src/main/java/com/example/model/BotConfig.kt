@@ -67,7 +67,8 @@ data class JumpTelemetryRecord(
     val sourceWidthPx: Float = 0f,
     val targetProfile: String = "MEDIUM",
     val targetColorGroup: String = "",
-    val appliedBiasMs: Long = 0L
+    val appliedBiasMs: Long = 0L,
+    val scoreDelta: Int? = null
 )
 
 data class PointF2D(
@@ -112,7 +113,8 @@ data class VisionAnalysisResult(
     val pawnStanceOffsetFrac: Float = 0f,
     val targetBlockProfile: String = "MEDIUM",
     val targetColorGroup: String = "",
-    val appliedContextBiasMs: Long = 0L
+    val appliedContextBiasMs: Long = 0L,
+    val scoreReading: Int? = null
 )
 
 data class BotLogEntry(

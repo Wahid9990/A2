@@ -219,6 +219,7 @@ class BotPreferencesRepository(private val context: Context) {
                 put("tp", r.targetProfile)
                 put("tc", r.targetColorGroup)
                 put("ab", r.appliedBiasMs)
+                if (r.scoreDelta != null) put("sd", r.scoreDelta)
             }
             arr.put(obj)
         }
@@ -264,7 +265,8 @@ class BotPreferencesRepository(private val context: Context) {
                         sourceWidthPx = o.optDouble("sw", 0.0).toFloat(),
                         targetProfile = o.optString("tp", "MEDIUM"),
                         targetColorGroup = o.optString("tc", ""),
-                        appliedBiasMs = o.optLong("ab", 0L)
+                        appliedBiasMs = o.optLong("ab", 0L),
+                        scoreDelta = if (o.has("sd")) o.optInt("sd") else null
                     )
                 )
             }
