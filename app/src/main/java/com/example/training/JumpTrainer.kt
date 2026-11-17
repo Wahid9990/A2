@@ -375,15 +375,21 @@ object JumpTrainer {
             val ctxDelta = learnedErrorMs * ctxWeight
 
             if (targetProfile != "MEDIUM") {
-                val blkShare = when {
-                    isMiniBlock && (stKey.isEmpty() || pawnStance == "CENTER") -> 0.78f
-                    isMiniBlock -> 0.55f
-                    stKey.isNotEmpty() && pawnStance != "CENTER" -> 0.45f
-                    else -> 0.65f
+                val skipNegativeMiniEdgeTrim = singlePointOffCenter &&
+                    isMiniBlock &&
+                    outcome == JumpOutcome.CENTER &&
+                    learnedErrorMs < 0f
+                if (!skipNegativeMiniEdgeTrim) {
+                    val blkShare = when {
+                        isMiniBlock && (stKey.isEmpty() || pawnStance == "CENTER") -> 0.78f
+                        isMiniBlock -> 0.55f
+                        stKey.isNotEmpty() && pawnStance != "CENTER" -> 0.45f
+                        else -> 0.65f
+                    }
+                    val blkCap = if (isMiniBlock) 90f else 65f
+                    val curBlk = newBiases[pKey] ?: 0f
+                    newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-blkCap, blkCap)
                 }
-                val blkCap = if (isMiniBlock) 90f else 65f
-                val curBlk = newBiases[pKey] ?: 0f
-                newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-blkCap, blkCap)
             }
 
             if (sKey.isNotEmpty()) {

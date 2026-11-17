@@ -449,4 +449,91 @@ class BlockVisionAnalyzerTest {
         phantomBmp.recycle()
         assertTrue("Bottom-left brown artifact at (97, 1147) must not trigger false pawn lock", !phantomResult.pawnFound)
     }
+
+    @Test
+    fun `tall cylindrical MINI cup keeps center Y on upper oval rim without drifting down sleeve wall`() {
+        val w = 720
+        val h = 1600
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        canvas.drawColor(android.graphics.Color.rgb(0x46, 0x4F, 0x82))
+
+        val blkPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        // Draw current block on right (around 500, 952)
+        val curCx = 500f
+        val curCy = 952f
+        val curW = 240f
+        val curH = 120f
+        val curTop = android.graphics.Path().apply {
+            moveTo(curCx, curCy - curH / 2f)
+            lineTo(curCx + curW / 2f, curCy)
+            lineTo(curCx, curCy + curH / 2f)
+            lineTo(curCx - curW / 2f, curCy)
+            close()
+        }
+        val curBody = android.graphics.Path().apply {
+            moveTo(curCx - curW / 2f, curCy)
+            lineTo(curCx, curCy + curH / 2f)
+            lineTo(curCx + curW / 2f, curCy)
+            lineTo(curCx + curW / 2f, curCy + 80f)
+            lineTo(curCx, curCy + curH / 2f + 80f)
+            lineTo(curCx - curW / 2f, curCy + 80f)
+            close()
+        }
+        blkPaint.color = android.graphics.Color.rgb(22, 130, 145)
+        canvas.drawPath(curBody, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(245, 245, 245)
+        canvas.drawPath(curTop, blkPaint)
+
+        // Draw pawn at (499, 952)
+        val pawnPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(0x3E, 0x33, 0x53)
+        }
+        val pawnX = 499f
+        val pawnY = 952f
+        val bodyPath = android.graphics.Path().apply {
+            moveTo(pawnX - 14f, pawnY - 12f)
+            lineTo(pawnX + 14f, pawnY - 12f)
+            lineTo(pawnX + 9f, pawnY - 52f)
+            lineTo(pawnX - 9f, pawnY - 52f)
+            close()
+        }
+        canvas.drawPath(bodyPath, pawnPaint)
+        canvas.drawOval(pawnX - 16f, pawnY - 18f, pawnX + 16f, pawnY - 4f, pawnPaint)
+        val collarPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(210, 175, 98)
+        }
+        canvas.drawOval(pawnX - 12f, pawnY - 60f, pawnX + 12f, pawnY - 50f, collarPaint)
+        canvas.drawCircle(pawnX, pawnY - 72f, 12f, pawnPaint)
+
+        // Draw tall cylindrical MINI cup up-left along 30-degree isometric line:
+        // true top oval center at (279, 822), width 91px, rim ellipse height 52px (topY = 796).
+        // Below equator, add a tall teal/cream sleeve that slightly flares from 91px to 98px
+        // around y=860..895 (mimicking rim bevel + cup wall noise).
+        val tCx = 279f
+        val tCy = 822f
+        val tW = 91f
+        val tH = 52f
+        blkPaint.color = android.graphics.Color.rgb(22, 165, 172)
+        canvas.drawRect(tCx - 45f, tCy, tCx + 45f, tCy + 85f, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(198, 168, 120)
+        canvas.drawRect(tCx - 49f, tCy + 34f, tCx + 49f, tCy + 68f, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(244, 244, 244)
+        canvas.drawOval(tCx - tW / 2f, tCy - tH / 2f, tCx + tW / 2f, tCy + tH / 2f, blkPaint)
+
+        val cfg = BotConfig(roiTopFraction = 0.28f, roiBottomFraction = 0.72f)
+        val result = BlockVisionAnalyzer.analyze(bmp, cfg)
+        bmp.recycle()
+
+        assertTrue("Pawn should be detected", result.pawnFound)
+        assertTrue("MINI cylindrical block should be detected", result.blockFound)
+        val bounds = result.blockBounds!!
+        assertEquals("Should classify as MINI", "MINI", result.targetBlockProfile)
+        val centerOffsetRatio = (bounds.center.y - bounds.topY) / bounds.widthPx.coerceAtLeast(1f)
+        assertTrue(
+            "Cylinder center.y (${bounds.center.y}) drifted down wall! topY=${bounds.topY}, w=${bounds.widthPx}, ratio=$centerOffsetRatio",
+            centerOffsetRatio <= 0.34f && kotlin.math.abs(bounds.center.y - tCy) <= 10f
+        )
+    }
 }
+

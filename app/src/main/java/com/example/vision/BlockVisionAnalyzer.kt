@@ -322,7 +322,8 @@ object BlockVisionAnalyzer {
         val blockCenterX = block.apexX * 0.35f + midpointX * 0.65f
         val blockCenterYRel = if (isIsometricDiamond) {
             val projectedEquator = block.apexY + block.maxTopWidth * 0.285f
-            (block.widestRowY * 0.5f + projectedEquator * 0.5f)
+            val cappedWidestY = min(block.widestRowY.toFloat(), block.apexY + block.maxTopWidth * 0.35f)
+            (cappedWidestY * 0.5f + projectedEquator * 0.5f)
         } else {
             (block.apexY + block.lastTopRowY) / 2f
         }
@@ -1105,7 +1106,8 @@ object BlockVisionAnalyzer {
             val isIsometricDiamond = traced.widestRowY > traced.apexY + 6
             val centerYRel = if (isIsometricDiamond) {
                 val projectedEquator = traced.apexY + traced.maxTopWidth * 0.285f
-                (traced.widestRowY * 0.5f + projectedEquator * 0.5f)
+                val cappedWidestY = min(traced.widestRowY.toFloat(), traced.apexY + traced.maxTopWidth * 0.35f)
+                (cappedWidestY * 0.5f + projectedEquator * 0.5f)
             } else {
                 (traced.apexY + traced.lastTopRowY) / 2f
             }
@@ -1159,7 +1161,8 @@ object BlockVisionAnalyzer {
                 // Prefer true 30-degree isometric blocks closest to the pawn and near newly arrived hints
                 val isoRatio = dxAbs / dyAbs.coerceAtLeast(1f)
                 val isoBonus = when {
-                    isoRatio in 0.85f..2.20f -> 450f
+                    isoRatio in 1.25f..1.95f -> 500f
+                    isoRatio in 0.85f..2.20f -> 380f
                     isoRatio in 0.35f..0.85f -> 180f
                     else -> 0f
                 }
@@ -1369,7 +1372,10 @@ object BlockVisionAnalyzer {
                 cLastTopRowY = ty
                 traceCenterX = ((lx + rx) / 2).coerceIn(marginX, width - marginX - 1)
 
-                if (ty <= maxWideningY && rowWidth > cMaxTopWidth + 3 && rowWidth <= maxReasonableWidth) {
+                val pastEquatorWall = cMaxTopWidth >= minValidBlockWidth &&
+                    ty > startY + (cMaxTopWidth * 0.36f).roundToInt() &&
+                    (ty - cWidestRowY) >= 6
+                if (!pastEquatorWall && ty <= maxWideningY && rowWidth > cMaxTopWidth + 3 && rowWidth <= maxReasonableWidth) {
                     cMaxTopWidth = rowWidth
                     cWidestRowY = ty
                     cWidestLeftX = lx.toFloat()

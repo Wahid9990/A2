@@ -565,5 +565,33 @@ class JumpTrainerTest {
         val mistBias = updated.adaptiveBiasesMs["MIST:MINI:SIDE_BACK:d450"] ?: 0f
         assertTrue("Near-rim MINI guard should stay gentle (>= -25ms), got $mistBias ($note)", mistBias >= -25f)
     }
+
+    @Test
+    fun `plus-1pt edge trim on MINI block does not pull shared BLK_MINI negative`() {
+        val cfg = BotConfig(
+            kFactor = 1.38f,
+            offsetMs = 41f,
+            autoTrainEnabled = true,
+            adaptiveBiasesMs = mapOf("BLK:MINI" to 4f)
+        )
+        val (updated, note) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 420f,
+            holdMs = 620L,
+            outcome = JumpOutcome.CENTER,
+            landingRatio = 1.03f,
+            history = emptyList(),
+            targetProfile = "MINI",
+            targetColorGroup = "PURPLE",
+            pawnStance = "SIDE_BACK",
+            scoreDelta = 1
+        )
+        val miniBiasAfter = updated.adaptiveBiasesMs["BLK:MINI"] ?: 0f
+        assertTrue(
+            "+1pt trim on one MINI block must never erode BLK:MINI negative (was 4f, got $miniBiasAfter, note=$note)",
+            miniBiasAfter >= 4f
+        )
+    }
 }
+
 
