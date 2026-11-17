@@ -21,6 +21,7 @@ data class BotConfig(
     val minPressMs: Long = 90L,
     val maxPressMs: Long = 1600L,
     val autoTrainEnabled: Boolean = true,
+    val humanizeTiming: Boolean = true,
     val adaptiveBiasesMs: Map<String, Float> = emptyMap()
 )
 

@@ -671,7 +671,247 @@ object BlockVisionAnalyzer {
             }
         }
 
-        return bestCandidate
+        if (bestCandidate != null && bestCandidate.collarHits >= 3) {
+            return bestCandidate
+        }
+
+        val collarRecovered = detectPawnByCollarAnchor(
+            pixels = pixels,
+            width = width,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            marginX = marginX,
+            pawnColorRgb = config.pawnColorRgb,
+            pawnTolSq = pawnTolSq,
+            excludedRect = excludedRect
+        )
+        return collarRecovered ?: bestCandidate
+    }
+
+    /**
+     * Fallback pawn detector anchored by the compact warm-gold collar ring between the dark head
+     * sphere and the cone body. Recovers the pawn when adjacent dark brick/stone walls merge
+     * with the cone inside coarse grid buckets.
+     */
+    private fun detectPawnByCollarAnchor(
+        pixels: IntArray,
+        width: Int,
+        roiTop: Int,
+        roiHeight: Int,
+        marginX: Int,
+        pawnColorRgb: Int,
+        pawnTolSq: Int,
+        excludedRect: Rect?
+    ): PawnCandidate? {
+        val targetR = (pawnColorRgb shr 16) and 0xFF
+        val targetG = (pawnColorRgb shr 8) and 0xFF
+        val targetB = pawnColorRgb and 0xFF
+
+        val goldCell = max(6, width / 110)
+        val goldBuckets = HashMap<Long, MutableList<Int>>()
+        var y = 0
+        while (y < roiHeight) {
+            val absY = roiTop + y
+            val rowOff = y * width
+            var x = marginX
+            while (x < width - marginX) {
+                if (!isExcluded(x, absY, excludedRect)) {
+                    val px = pixels[rowOff + x]
+                    val r = (px shr 16) and 0xFF
+                    val g = (px shr 8) and 0xFF
+                    val b = px and 0xFF
+                    if (r > 150 && g > 105 && b < 135 && (r - b) > 42 && r >= g) {
+                        val key = ((x / goldCell).toLong() shl 32) or ((absY / goldCell).toLong() and 0xFFFFFFFFL)
+                        goldBuckets.getOrPut(key) { ArrayList(8) }.add((x shl 16) or (y and 0xFFFF))
+                    }
+                }
+                x += 2
+            }
+            y += 2
+        }
+        if (goldBuckets.isEmpty()) return null
+
+        val maxCollarW = (width * 0.090f).roundToInt()
+        val maxCollarH = (width * 0.055f).roundToInt()
+        val maxHeadUp = (width * 0.062f).roundToInt()
+        val maxHeadHalfW = (width * 0.032f).roundToInt()
+        val maxConeDown = (width * 0.132f).roundToInt()
+        val maxConeHalfW = (width * 0.044f).roundToInt()
+        val maxConeRowWidth = (width * 0.068f).roundToInt()
+
+        fun matchesPawn(px: Int): Boolean {
+            val dr = ((px shr 16) and 0xFF) - targetR
+            val dg = ((px shr 8) and 0xFF) - targetG
+            val db = (px and 0xFF) - targetB
+            return dr * dr + dg * dg + db * db <= pawnTolSq
+        }
+
+        val visited = HashSet<Long>(goldBuckets.size)
+        val queue = ArrayDeque<Long>()
+        var best: PawnCandidate? = null
+
+        for (startKey in goldBuckets.keys) {
+            if (!visited.add(startKey)) continue
+            queue.clear()
+            queue.add(startKey)
+
+            var gMinX = Int.MAX_VALUE
+            var gMaxX = Int.MIN_VALUE
+            var gMinRelY = Int.MAX_VALUE
+            var gMaxRelY = Int.MIN_VALUE
+            var goldHits = 0
+            var goldSumX = 0L
+            var goldSumY = 0L
+
+            while (queue.isNotEmpty()) {
+                val key = queue.removeFirst()
+                val pts = goldBuckets[key] ?: continue
+                for (packed in pts) {
+                    val px = packed ushr 16
+                    val py = packed and 0xFFFF
+                    if (px < gMinX) gMinX = px
+                    if (px > gMaxX) gMaxX = px
+                    if (py < gMinRelY) gMinRelY = py
+                    if (py > gMaxRelY) gMaxRelY = py
+                    goldHits++
+                    goldSumX += px
+                    goldSumY += (roiTop + py)
+                }
+                val gx = (key shr 32).toInt()
+                val gy = (key and 0xFFFFFFFFL).toInt()
+                for (dx in -1..1) {
+                    for (dy in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val neighbor = ((gx + dx).toLong() shl 32) or ((gy + dy).toLong() and 0xFFFFFFFFL)
+                        if (goldBuckets.containsKey(neighbor) && visited.add(neighbor)) {
+                            queue.add(neighbor)
+                        }
+                    }
+                }
+            }
+
+            if (goldHits < 3) continue
+            if ((gMaxX - gMinX) > maxCollarW || (gMaxRelY - gMinRelY) > maxCollarH) continue
+
+            val collarCx = (goldSumX.toFloat() / goldHits).roundToInt()
+            val collarRelY = (goldSumY.toFloat() / goldHits - roiTop).roundToInt()
+            if (collarRelY < 6 || collarRelY >= roiHeight - 6) continue
+
+            val xs = ArrayList<Int>(160)
+            val ys = ArrayList<Int>(160)
+
+            // Trace sphere head above the collar
+            var headHits = 0
+            val headTopRelY = (collarRelY - maxHeadUp).coerceAtLeast(0)
+            val headBotRelY = (gMinRelY - 1).coerceAtLeast(0)
+            var hy = headTopRelY
+            while (hy <= headBotRelY) {
+                val absY = roiTop + hy
+                val rowOff = hy * width
+                val lxBound = (collarCx - maxHeadHalfW).coerceAtLeast(marginX)
+                val rxBound = (collarCx + maxHeadHalfW).coerceAtMost(width - marginX - 1)
+                for (hx in lxBound..rxBound step 2) {
+                    if (!isExcluded(hx, absY, excludedRect) && matchesPawn(pixels[rowOff + hx])) {
+                        xs.add(hx)
+                        ys.add(absY)
+                        headHits++
+                    }
+                }
+                hy += 2
+            }
+
+            // Trace cone body below the collar, stopping before blooming into dark block walls
+            var coneHits = 0
+            var emptyConeRows = 0
+            val coneStartRelY = (gMaxRelY + 1).coerceAtMost(roiHeight - 1)
+            val coneEndRelY = (collarRelY + maxConeDown).coerceAtMost(roiHeight - 1)
+            var cy = coneStartRelY
+            while (cy <= coneEndRelY) {
+                val absY = roiTop + cy
+                val rowOff = cy * width
+                val lxBound = (collarCx - maxConeHalfW).coerceAtLeast(marginX)
+                val rxBound = (collarCx + maxConeHalfW).coerceAtMost(width - marginX - 1)
+
+                var rowMinX = Int.MAX_VALUE
+                var rowMaxX = Int.MIN_VALUE
+                var rowHits = 0
+                for (cxPos in lxBound..rxBound step 2) {
+                    if (!isExcluded(cxPos, absY, excludedRect) && matchesPawn(pixels[rowOff + cxPos])) {
+                        if (cxPos < rowMinX) rowMinX = cxPos
+                        if (cxPos > rowMaxX) rowMaxX = cxPos
+                        rowHits++
+                    }
+                }
+
+                // Check outer margin to ensure this row didn't bleed into a wide horizontal stone wall
+                var wallBleedLeft = 0
+                var wallBleedRight = 0
+                if (rowHits > 0 && rowMinX <= lxBound + 2) {
+                    var wx = lxBound - 2
+                    while (wx >= max(marginX, collarCx - maxConeRowWidth)) {
+                        if (matchesPawn(pixels[rowOff + wx])) wallBleedLeft += 2 else break
+                        wx -= 2
+                    }
+                }
+                if (rowHits > 0 && rowMaxX >= rxBound - 2) {
+                    var wx = rxBound + 2
+                    while (wx <= min(width - marginX - 1, collarCx + maxConeRowWidth)) {
+                        if (matchesPawn(pixels[rowOff + wx])) wallBleedRight += 2 else break
+                        wx += 2
+                    }
+                }
+                val apparentRowW = if (rowHits > 0) (rowMaxX - rowMinX) + wallBleedLeft + wallBleedRight else 0
+                if (apparentRowW > maxConeRowWidth) {
+                    break
+                }
+
+                if (rowHits >= 2) {
+                    emptyConeRows = 0
+                    for (cxPos in lxBound..rxBound step 2) {
+                        if (!isExcluded(cxPos, absY, excludedRect) && matchesPawn(pixels[rowOff + cxPos])) {
+                            xs.add(cxPos)
+                            ys.add(absY)
+                            coneHits++
+                        }
+                    }
+                } else if (cy - coneStartRelY > 6) {
+                    emptyConeRows++
+                    if (emptyConeRows >= 4) break
+                }
+                cy += 2
+            }
+
+            if (headHits < 6 || coneHits < 8) continue
+
+            var pMinX = Int.MAX_VALUE
+            var pMaxX = Int.MIN_VALUE
+            var pMinY = Int.MAX_VALUE
+            var pMaxY = Int.MIN_VALUE
+            for (i in xs.indices) {
+                val px = xs[i]
+                val py = ys[i]
+                if (px < pMinX) pMinX = px
+                if (px > pMaxX) pMaxX = px
+                if (py < pMinY) pMinY = py
+                if (py > pMaxY) pMaxY = py
+            }
+            val score = (xs.size * 2) + (goldHits * 180) + 4500
+            val cand = PawnCandidate(
+                xs = xs,
+                ys = ys,
+                minX = pMinX,
+                maxX = pMaxX,
+                minY = pMinY,
+                maxY = pMaxY,
+                collarHits = goldHits,
+                collarCenterY = goldSumY.toFloat() / goldHits,
+                score = score
+            )
+            if (best == null || cand.score > best.score) {
+                best = cand
+            }
+        }
+        return best
     }
 
     private fun scanForTargetBlock(
@@ -744,8 +984,8 @@ object BlockVisionAnalyzer {
             val dxAbs = abs(centerX - pawnCenterX)
             val dyAbs = pawnBaseY - centerY
             val distFromPawn = hypot(dxAbs, dyAbs)
-            val overlapsPawnBase = pawnCenterX in (traced.widestLeftX - 12f)..(traced.widestRightX + 12f) &&
-                pawnBaseY in (roiTop + ry - 10f)..(roiTop + traced.lastTopRowY + width * 0.22f)
+            val overlapsPawnBase = pawnCenterX in (traced.widestLeftX + 10f)..(traced.widestRightX - 10f) &&
+                pawnBaseY in (roiTop + ry - 8f)..(roiTop + traced.lastTopRowY + 10f)
 
             val contrastOk = !requireInternalContrast || hasInternalBlockContrast(
                 pixels = pixels,

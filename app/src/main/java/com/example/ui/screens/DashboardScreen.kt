@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material.icons.filled.Visibility
@@ -98,6 +99,7 @@ fun DashboardScreen(
     onTapXChange: (Float) -> Unit,
     onTapYChange: (Float) -> Unit,
     onToggleAutoTrain: (Boolean) -> Unit,
+    onToggleHumanizeTiming: (Boolean) -> Unit,
     onManualFeedback: (Boolean) -> Unit,
     onBuildReport: () -> String,
     onClearTrainingHistory: () -> Unit,
@@ -247,6 +249,7 @@ fun DashboardScreen(
                     config = config,
                     isDebugVisionEnabled = isDebugVisionEnabled,
                     onToggleDebugVision = onToggleDebugVision,
+                    onToggleHumanizeTiming = onToggleHumanizeTiming,
                     onToggleAutoLoop = onToggleAutoLoop,
                     onTriggerSingleStep = onTriggerSingleStep,
                     onCooldownChange = onCooldownChange,
@@ -459,6 +462,7 @@ private fun AutomationControlsCard(
     config: BotConfig,
     isDebugVisionEnabled: Boolean,
     onToggleDebugVision: () -> Unit,
+    onToggleHumanizeTiming: (Boolean) -> Unit,
     onToggleAutoLoop: () -> Unit,
     onTriggerSingleStep: () -> Unit,
     onCooldownChange: (Long) -> Unit,
@@ -570,6 +574,40 @@ private fun AutomationControlsCard(
                     checked = isDebugVisionEnabled,
                     onCheckedChange = { onToggleDebugVision() },
                     modifier = Modifier.testTag("switch_debug_vision")
+                )
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Speed,
+                    contentDescription = "Human-Like Jump Pacing",
+                    tint = if (config.humanizeTiming) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Human-Like Jump Pacing",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Mixes quick hops, natural rhythm, occasional short pauses & tap drift",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = config.humanizeTiming,
+                    onCheckedChange = onToggleHumanizeTiming,
+                    modifier = Modifier.testTag("switch_humanize_timing")
                 )
             }
 

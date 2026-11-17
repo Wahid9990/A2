@@ -191,6 +191,7 @@ fun JumpAssistApp(viewModel: MainViewModel = viewModel()) {
                             onTapXChange = viewModel::updateTapX,
                             onTapYChange = viewModel::updateTapY,
                             onToggleAutoTrain = viewModel::updateAutoTrainEnabled,
+                            onToggleHumanizeTiming = viewModel::updateHumanizeTiming,
                             onManualFeedback = viewModel::applyManualFeedback,
                             onBuildReport = viewModel::buildTelemetryReport,
                             onClearTrainingHistory = viewModel::clearTrainingHistory,

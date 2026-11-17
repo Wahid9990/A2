@@ -47,6 +47,7 @@ import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 class ScreenCaptureService : Service() {
 
@@ -484,6 +485,21 @@ class ScreenCaptureService : Service() {
         val baseTapY = screenHeight * config.tapYFraction
         val holdMs = stableResult.computedDurationMs
 
+        if (requireStability && config.humanizeTiming && AutomationBridge.isAutoLoopActive.value) {
+            val humanPauseMs = computeHumanPreJumpPauseMs()
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "HUMAN_PACING",
+                    message = "Human pace (${humanPauseMs}ms) → D=${stableResult.rawDistancePx.roundToInt()}px",
+                    showTargetHighlight = true
+                )
+            )
+            delay(humanPauseMs)
+            if (!AutomationBridge.isAutoLoopActive.value) {
+                return 160L
+            }
+        }
+
         val biasNote = if (stableResult.appliedContextBiasMs != 0L) String.format(Locale.US, "%+d", stableResult.appliedContextBiasMs) else "0"
         AutomationBridge.appendLog(
             String.format(
@@ -500,10 +516,11 @@ class ScreenCaptureService : Service() {
             )
         )
 
+        val tapSpread = if (config.humanizeTiming) 18 else 6
         var completed = false
         for (attempt in 0..1) {
-            val jitterX = kotlin.random.Random.nextInt(-10, 11).toFloat()
-            val jitterY = kotlin.random.Random.nextInt(-10, 11).toFloat()
+            val jitterX = kotlin.random.Random.nextInt(-tapSpread, tapSpread + 1).toFloat()
+            val jitterY = kotlin.random.Random.nextInt(-tapSpread, tapSpread + 1).toFloat()
             val tapX = (baseTapX + jitterX).coerceIn(40f, screenWidth - 40f)
             val tapY = (baseTapY + jitterY).coerceIn(40f, screenHeight - 40f)
 
@@ -579,7 +596,8 @@ class ScreenCaptureService : Service() {
         }
 
         // Wait remaining cooldown for camera pan / Game Over popup to finish settling
-        val remainingCooldown = (config.jumpCooldownMs - 570L).coerceAtLeast(320L)
+        val cooldownJitter = if (config.humanizeTiming) kotlin.random.Random.nextLong(-45L, 165L) else 0L
+        val remainingCooldown = (config.jumpCooldownMs - 570L + cooldownJitter).coerceAtLeast(320L)
         delay(remainingCooldown)
         val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
 
@@ -827,6 +845,24 @@ class ScreenCaptureService : Service() {
         const val EXTRA_DATA = "extra_data"
         private const val CHANNEL_ID = "jump_assist_capture_channel"
         private const val NOTIFICATION_ID = 4102
+
+        /**
+         * Natural human pre-jump reaction distribution:
+         * ~38% quick confident hops (55..210ms),
+         * ~44% standard human rhythm (240..590ms),
+         * ~18% occasional brief aiming/thinking pauses (680..1280ms).
+         */
+        fun computeHumanPreJumpPauseMs(
+            tierSample: Float = kotlin.random.Random.nextFloat(),
+            withinTierSample: Float = kotlin.random.Random.nextFloat()
+        ): Long {
+            val u = withinTierSample.coerceIn(0f, 1f)
+            return when {
+                tierSample < 0.38f -> (55f + u * 155f).roundToLong()
+                tierSample < 0.82f -> (240f + u * 350f).roundToLong()
+                else -> (680f + u * 600f).roundToLong()
+            }
+        }
 
         fun startIntent(context: Context, resultCode: Int, data: Intent): Intent {
             return Intent(context, ScreenCaptureService::class.java).apply {

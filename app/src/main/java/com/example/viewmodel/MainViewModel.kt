@@ -264,6 +264,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         AutomationBridge.appendLog(if (enabled) "Self-Training enabled" else "Self-Training paused")
     }
 
+    fun updateHumanizeTiming(enabled: Boolean) {
+        updateConfig { it.copy(humanizeTiming = enabled) }
+        AutomationBridge.appendLog(if (enabled) "Human-Like Jump Pacing enabled" else "Human-Like Jump Pacing disabled")
+    }
+
     fun applyManualFeedback(isShort: Boolean) {
         if (AutomationBridge.isScreenCaptureActive.value) {
             AutomationBridge.requestManualFeedback(isShort)

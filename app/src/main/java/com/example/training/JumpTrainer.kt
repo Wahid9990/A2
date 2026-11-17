@@ -503,7 +503,7 @@ object JumpTrainer {
         sb.appendLine(
             String.format(
                 Locale.US,
-                "Config: mode=%s k=%.3f b=%.1f pawn=#%06X tol=%d bgDiff=%d roi=%.2f..%.2f cooldown=%dms autoTrain=%s",
+                "Config: mode=%s k=%.3f b=%.1f pawn=#%06X tol=%d bgDiff=%d roi=%.2f..%.2f cooldown=%dms autoTrain=%s humanTiming=%s",
                 config.formulaMode.name,
                 config.kFactor,
                 config.offsetMs,
@@ -513,7 +513,8 @@ object JumpTrainer {
                 config.roiTopFraction,
                 config.roiBottomFraction,
                 config.jumpCooldownMs,
-                config.autoTrainEnabled
+                config.autoTrainEnabled,
+                config.humanizeTiming
             )
         )
         if (config.adaptiveBiasesMs.isNotEmpty()) {

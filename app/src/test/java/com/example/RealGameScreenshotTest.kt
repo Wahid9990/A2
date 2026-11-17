@@ -104,4 +104,51 @@ class RealGameScreenshotTest {
             }
         }
     }
+
+    @Test
+    fun `analyzes waterfall close-block screenshots score 91 and score 32`() {
+        val shots = listOf(
+            // (path, expectedPawnXRange, expectedBlockXRange, hudRect)
+            listOf(
+                "public/assets/aistudio/Screenshot_20261117_193305_4fd83fcee830ed007aacc9cec66270f7_aca36631.jpg",
+                280f..355f,
+                390f..485f,
+                Rect(30, 145, 455, 430)
+            ),
+            listOf(
+                "public/assets/aistudio/Screenshot_20261117_192934_4fd83fcee830ed007aacc9cec66270f7_5a4db4ae.jpg",
+                455f..535f,
+                205f..290f,
+                Rect(30, 145, 455, 430)
+            )
+        )
+        for ((idx, item) in shots.withIndex()) {
+            val path = item[0] as String
+            @Suppress("UNCHECKED_CAST")
+            val expectedPawnRange = item[1] as ClosedFloatingPointRange<Float>
+            @Suppress("UNCHECKED_CAST")
+            val expectedBlockRange = item[2] as ClosedFloatingPointRange<Float>
+            val hudRect = item[3] as Rect
+            val bmp = loadWorkspaceImageOrSkip(path)
+            val res = BlockVisionAnalyzer.analyze(bmp, BotConfig(), excludedRect = hudRect)
+            println("WATERFALL SHOT ${idx + 8} => $res")
+            assertTrue("Waterfall shot ${idx + 8}: Pawn should be detected (${res.statusMessage})", res.pawnFound)
+            assertTrue("Waterfall shot ${idx + 8}: Pawn X (${res.pawnCenterX}) should be in $expectedPawnRange", res.pawnCenterX in expectedPawnRange)
+            assertTrue("Waterfall shot ${idx + 8}: Next block should be detected (${res.statusMessage})", res.blockFound)
+            val bx = res.blockBounds?.center?.x ?: 0f
+            val bw = res.blockBounds?.widthPx ?: 0f
+            assertTrue("Waterfall shot ${idx + 8}: Target block center X ($bx) should be in $expectedBlockRange", bx in expectedBlockRange)
+            assertTrue("Waterfall shot ${idx + 8}: Target block width ($bw) should be > 200px", bw > 200f)
+        }
+    }
+
+    @Test
+    fun `human pre-jump pacing produces fast medium and thoughtful tiers`() {
+        val fast = com.example.service.ScreenCaptureService.computeHumanPreJumpPauseMs(0.10f, 0.50f)
+        val medium = com.example.service.ScreenCaptureService.computeHumanPreJumpPauseMs(0.55f, 0.50f)
+        val slow = com.example.service.ScreenCaptureService.computeHumanPreJumpPauseMs(0.92f, 0.50f)
+        assertTrue("Fast tier should be in 55..210ms, got $fast", fast in 55L..210L)
+        assertTrue("Medium tier should be in 240..590ms, got $medium", medium in 240L..590L)
+        assertTrue("Thoughtful pause tier should be in 680..1280ms, got $slow", slow in 680L..1280L)
+    }
 }
