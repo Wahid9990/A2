@@ -410,4 +410,62 @@ class JumpTrainerTest {
             kotlin.math.abs(afterMiniShort.kFactor - baseCfg.kFactor) <= 0.03f
         )
     }
+
+    @Test
+    fun `single short-distance PAST outlier cannot slash k sharply or wipe SIDE_BACK bias`() {
+        val trainedCfg = BotConfig(
+            kFactor = 1.363f,
+            offsetMs = 45f,
+            autoTrainEnabled = true,
+            adaptiveBiasesMs = mapOf("STANCE:SIDE_BACK" to 24f)
+        )
+        val (afterPast, note) = JumpTrainer.applyOnlineUpdate(
+            config = trainedCfg,
+            dNorm = 243f,
+            holdMs = 384L,
+            outcome = JumpOutcome.PAST_CENTER,
+            landingRatio = 1.34f,
+            history = emptyList(),
+            targetProfile = "MEDIUM",
+            targetColorGroup = "CYAN",
+            pawnStance = "SIDE_BACK"
+        )
+        assertTrue(
+            "Non-fatal PAST outlier must never drop k by more than 0.014 ($note: 1.363 -> ${afterPast.kFactor})",
+            trainedCfg.kFactor - afterPast.kFactor <= 0.0141f
+        )
+        val sideBackAfter = afterPast.adaptiveBiasesMs["STANCE:SIDE_BACK"] ?: 0f
+        assertTrue(
+            "Single PAST outlier must not wipe positive SIDE_BACK bias (remained $sideBackAfter)",
+            sideBackAfter >= 12f
+        )
+    }
+
+    @Test
+    fun `slight short drift r=0_96 trims k gently and OUT_UNKNOWN r=0_95 recovers upward`() {
+        val cfg = BotConfig(kFactor = 1.314f, offsetMs = 43f, autoTrainEnabled = true)
+        val (trimmed, trimNote) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 413f,
+            holdMs = 578L,
+            outcome = JumpOutcome.CENTER,
+            landingRatio = 0.96f,
+            history = emptyList()
+        )
+        assertTrue("Slightly short r=0.96 should trim k gently upward ($trimNote)", trimmed.kFactor > cfg.kFactor)
+
+        val (recovered, outNote) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 346f,
+            holdMs = 491L,
+            outcome = JumpOutcome.OUT_UNKNOWN,
+            landingRatio = 0.95f,
+            history = emptyList(),
+            targetProfile = "MINI",
+            targetColorGroup = "SLATE",
+            pawnStance = "CENTER"
+        )
+        val nextMiniBias = JumpTrainer.computeContextAdjustmentMs(recovered, 346f, "MINI", "SLATE", "CENTER")
+        assertTrue("OUT_UNKNOWN with pre-fall r=0.95 must recover upward ($outNote), got bias=$nextMiniBias", nextMiniBias >= 25L)
+    }
 }

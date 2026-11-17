@@ -19,10 +19,11 @@ object JumpTrainer {
     private const val MIN_B = -15f
     private const val MAX_B = 75f
     private const val ANCHOR_K = 1.38f
-    private const val MAX_AUTO_K_STEP = 0.055f
-    private const val MAX_CONTEXT_BIAS_MS = 140f
-    private const val MAX_MISTAKE_GUARD_MS = 120f
-    private const val MAX_STORED_BIASES = 36
+    private const val MAX_NON_FATAL_K_STEP = 0.014f
+    private const val MAX_FATAL_K_STEP = 0.038f
+    private const val MAX_CONTEXT_BIAS_MS = 120f
+    private const val MAX_MISTAKE_GUARD_MS = 100f
+    private const val MAX_STORED_BIASES = 48
 
     fun distBucket(dNorm: Float): Int = ((dNorm / 50f).roundToInt() * 50).coerceIn(100, 1200)
 
@@ -240,10 +241,12 @@ object JumpTrainer {
                         note = String.format(Locale.US, "Out-short recovery (+%.3f k)", pull)
                     }
                     else -> {
-                        // Never repeat the exact same failed hold: pick direction from stance / prior attempt
+                        // Never repeat the exact same failed hold: prefer pre-fall ratio direction, then stance / history
                         val guardDelta = when {
-                            existingMist <= -70f -> 48f // previous downward guards still missed, flip to avoid trap
-                            existingMist >= 70f -> -48f
+                            existingMist <= -65f -> 46f // previous downward guards still missed, flip to avoid trap
+                            existingMist >= 65f -> -46f
+                            landingRatio != null && landingRatio < 0.97f -> 38f
+                            landingRatio != null && landingRatio > 1.03f -> -38f
                             pawnStance == "SIDE_BACK" -> 38f
                             pawnStance == "SIDE_FRONT" -> -38f
                             prevSameSpot != null && prevSameSpot.holdMs >= holdMs -> -36f
@@ -263,32 +266,42 @@ object JumpTrainer {
 
             landingRatio != null && landingRatio in 0.72f..1.65f -> {
                 val errorRatio = 1.0f - landingRatio
-                if (abs(errorRatio) <= 0.045f) {
+                if (abs(errorRatio) <= 0.025f) {
                     note = String.format(Locale.US, "Dead center (r=%.2f)", landingRatio)
                     // Reinforce winning mistake guard into permanent block/stance bias cleanly
                     val wonMist = newBiases[mKey]
                     if (wonMist != null && abs(wonMist) >= 4f) {
-                        newBiases[pKey] = ((newBiases[pKey] ?: 0f) + wonMist * 0.20f).coerceIn(-90f, 90f)
+                        newBiases[pKey] = ((newBiases[pKey] ?: 0f) + wonMist * 0.20f).coerceIn(-80f, 80f)
                         newBiases[mKey] = (wonMist * 0.80f)
                     }
                 } else {
-                    val safeRatio = landingRatio.coerceIn(0.74f, 1.40f)
+                    val safeRatio = landingRatio.coerceIn(0.76f, 1.36f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
-                    val gain = if (outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER) 0.44f else 0.30f
-                    val deltaMs = (idealHoldMs - holdMs.toFloat()) * gain
+                    val gain = when {
+                        abs(errorRatio) <= 0.060f -> 0.18f
+                        outcome == JumpOutcome.SHORT || outcome == JumpOutcome.PAST_CENTER -> 0.34f
+                        else -> 0.26f
+                    }
+                    // Prevent a single noisy jump (especially at short D) from slashing k/STANCE
+                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * gain).coerceIn(-28f, 28f)
                     learnedErrorMs = deltaMs
+                    val shortDistDamp = if (dNorm < 280f) 0.55f else 1.0f
 
-                    newK += ((deltaMs * globalShare) * 0.85f) / dNorm.coerceAtLeast(150f)
-                    newB += (deltaMs * globalShare) * 0.15f
-                    note = String.format(Locale.US, "LMS r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                    newK += ((deltaMs * globalShare * shortDistDamp) * 0.80f) / dNorm.coerceAtLeast(180f)
+                    newB += (deltaMs * globalShare) * 0.20f
+                    note = if (abs(errorRatio) <= 0.045f) {
+                        String.format(Locale.US, "Center trim r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                    } else {
+                        String.format(Locale.US, "LMS r=%.2f Δ=%.0fms", landingRatio, deltaMs)
+                    }
                 }
             }
 
             outcome == JumpOutcome.SHORT -> {
-                learnedErrorMs = 30f
-                newK += 0.040f * globalShare
-                newB += 6f * globalShare
+                learnedErrorMs = 28f
+                newK += 0.014f * globalShare
+                newB += 4f * globalShare
                 note = "Short fallback (+k,+b)"
             }
         }
@@ -308,18 +321,20 @@ object JumpTrainer {
                 stKey.isNotEmpty() && pawnStance != "CENTER" -> 0.45f
                 else -> 0.65f
             }
-            val blkCap = if (isMiniBlock) 110f else 90f
+            val blkCap = if (isMiniBlock) 90f else 75f
             val curBlk = newBiases[pKey] ?: 0f
             newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-blkCap, blkCap)
 
             if (sKey.isNotEmpty()) {
                 val curSig = newBiases[sKey] ?: 0f
-                newBiases[sKey] = (curSig + ctxDelta * 0.25f).coerceIn(-75f, 75f)
+                newBiases[sKey] = (curSig + ctxDelta * 0.22f).coerceIn(-42f, 42f)
             }
 
             if (stKey.isNotEmpty() && pawnStance != "CENTER") {
                 val curSt = newBiases[stKey] ?: 0f
-                newBiases[stKey] = (curSt + ctxDelta * 0.35f).coerceIn(-75f, 75f)
+                val maxStStep = if (isFatalOut) 18f else 11f
+                val stDelta = (ctxDelta * 0.35f).coerceIn(-maxStStep, maxStStep)
+                newBiases[stKey] = (curSt + stDelta).coerceIn(-50f, 50f)
                 if (!note.contains(pawnStance)) {
                     note += " [$pawnStance]"
                 }
@@ -354,15 +369,19 @@ object JumpTrainer {
                 if (maxD - minD >= 100f) {
                     val fitted = weightedLinearFit(fitSamples, config)
                     if (fitted != null) {
-                        newK = newK * 0.86f + fitted.first * 0.14f
-                        newB = newB * 0.86f + fitted.second * 0.14f
+                        newK = newK * 0.90f + fitted.first * 0.10f
+                        newB = newB * 0.90f + fitted.second * 0.10f
                         note += " + OLS"
                     }
                 }
             }
         }
 
-        val maxStep = if (allowLargeRecovery) 0.15f else MAX_AUTO_K_STEP
+        val maxStep = when {
+            allowLargeRecovery && abs(config.kFactor - ANCHOR_K) > 0.14f -> 0.15f
+            isFatalOut -> MAX_FATAL_K_STEP
+            else -> MAX_NON_FATAL_K_STEP
+        }
         val clampedStepK = (newK - config.kFactor).coerceIn(-maxStep, maxStep)
         newK = (((config.kFactor + clampedStepK).coerceIn(MIN_K, MAX_K)) * 1000f).roundToInt() / 1000f
         newB = ((newB.coerceIn(MIN_B, MAX_B)) * 10f).roundToInt() / 10f
@@ -387,13 +406,17 @@ object JumpTrainer {
             }
         }
         if (rounded.size <= MAX_STORED_BIASES) return rounded
-        // Keep all BLK: and STANCE: entries; trim oldest MIST: / SIG: entries first
+        // Always keep BLK:, STANCE:, and small-target MIST:MINI / MIST:NARROW entries; trim oldest others first
         val kept = LinkedHashMap<String, Float>()
-        val core = rounded.entries.filter { it.key.startsWith("BLK:") || it.key.startsWith("STANCE:") }
-        val extra = rounded.entries.filterNot { it.key.startsWith("BLK:") || it.key.startsWith("STANCE:") }
-        core.forEach { kept[it.key] = it.value }
+        val isCore: (String) -> Boolean = { key ->
+            key.startsWith("BLK:") ||
+                key.startsWith("STANCE:") ||
+                key.startsWith("MIST:MINI:") ||
+                key.startsWith("MIST:NARROW:")
+        }
+        rounded.entries.filter { isCore(it.key) }.forEach { kept[it.key] = it.value }
         val budget = (MAX_STORED_BIASES - kept.size).coerceAtLeast(0)
-        extra.takeLast(budget).forEach { kept[it.key] = it.value }
+        rounded.entries.filterNot { isCore(it.key) }.takeLast(budget).forEach { kept[it.key] = it.value }
         return kept
     }
 

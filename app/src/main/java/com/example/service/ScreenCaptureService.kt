@@ -366,8 +366,8 @@ class ScreenCaptureService : Service() {
             var lastDistDrift = Float.MAX_VALUE
             var lastPawnDrift = Float.MAX_VALUE
 
-            while (checks < 6 && AutomationBridge.isAutoLoopActive.value) {
-                delay(90L)
+            while (checks < 8 && AutomationBridge.isAutoLoopActive.value) {
+                delay(80L)
                 val nextPair = analyzeLatestFrameWithDiag(
                     config = config,
                     overlayRect = overlayRect,
@@ -388,7 +388,7 @@ class ScreenCaptureService : Service() {
                         abs(stableResult.pawnBaseY - nextResult.pawnBaseY)
                     )
                     val widthDrift = abs(prevW - nextW)
-                    if (lastDistDrift <= 12f && lastPawnDrift <= 8f && widthDrift <= 20f) {
+                    if (lastDistDrift <= 8f && lastPawnDrift <= 5f && widthDrift <= 14f) {
                         stableResult = nextResult
                         stableDiag = nextPair.second
                         lockedStable = true
@@ -398,7 +398,7 @@ class ScreenCaptureService : Service() {
                     AutomationBridge.updateVisionDebugStatus(
                         VisionDebugStatus(
                             phase = "WAITING_STABILITY",
-                            message = "Stabilizing (${checks + 1}/6): ΔD=${lastDistDrift.roundToInt()}px ΔP=${lastPawnDrift.roundToInt()}px",
+                            message = "Stabilizing (${checks + 1}/8): ΔD=${lastDistDrift.roundToInt()}px ΔP=${lastPawnDrift.roundToInt()}px",
                             showTargetHighlight = true
                         )
                     )
@@ -434,8 +434,7 @@ class ScreenCaptureService : Service() {
                     )
                     return 260L
                 }
-                // Fallback: if pawn is stationary and block shimmer kept distance within 24px, proceed rather than stalling
-                if (lastPawnDrift > 8f || lastDistDrift > 24f) {
+                if (lastPawnDrift > 6f || lastDistDrift > 11f) {
                     AutomationBridge.updateAnalysis(stableResult)
                     AutomationBridge.updateVisionDebugStatus(
                         VisionDebugStatus(
@@ -444,7 +443,7 @@ class ScreenCaptureService : Service() {
                             showTargetHighlight = true
                         )
                     )
-                    return 110L
+                    return 100L
                 }
             }
         }
@@ -483,7 +482,6 @@ class ScreenCaptureService : Service() {
 
         val baseTapX = screenWidth * config.tapXFraction
         val baseTapY = screenHeight * config.tapYFraction
-        val holdMs = stableResult.computedDurationMs
 
         if (requireStability && config.humanizeTiming && AutomationBridge.isAutoLoopActive.value) {
             val humanPauseMs = computeHumanPreJumpPauseMs()
@@ -498,7 +496,35 @@ class ScreenCaptureService : Service() {
             if (!AutomationBridge.isAutoLoopActive.value) {
                 return 160L
             }
+            // Re-verify fresh frame after waiting so we never jump using stale pre-pause geometry
+            val postPausePair = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)
+            val postPause = postPausePair?.first
+            if (postPause == null || !postPause.pawnFound || !postPause.blockFound) {
+                return 140L
+            }
+            if (abs(postPause.rawDistancePx - stableResult.rawDistancePx) > 10f ||
+                abs(postPause.pawnCenterX - stableResult.pawnCenterX) > 7f
+            ) {
+                AutomationBridge.updateAnalysis(postPause)
+                return 90L
+            }
+            stableResult = postPause
+            stableDiag = postPausePair.second
+            AutomationBridge.updateAnalysis(stableResult)
         }
+
+        if (stableResult.normalizedDistancePx !in 85f..940f) {
+            AutomationBridge.updateVisionDebugStatus(
+                VisionDebugStatus(
+                    phase = "WAITING_STABILITY",
+                    message = "Out-of-range D=${stableResult.rawDistancePx.roundToInt()}px — re-locking",
+                    showTargetHighlight = false
+                )
+            )
+            return 180L
+        }
+
+        val holdMs = stableResult.computedDurationMs
 
         val biasNote = if (stableResult.appliedContextBiasMs != 0L) String.format(Locale.US, "%+d", stableResult.appliedContextBiasMs) else "0"
         AutomationBridge.appendLog(
