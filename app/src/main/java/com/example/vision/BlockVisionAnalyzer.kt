@@ -209,6 +209,20 @@ object BlockVisionAnalyzer {
         val subtleThreshold = max(8, (config.bgDiffThreshold * 0.24f).roundToInt())
         val subtleThresholdSq = subtleThreshold * subtleThreshold * 3
 
+        val preSourceStance = detectSourcePlatformAndStance(
+            pixels = pixels,
+            width = width,
+            roiTop = roiTop,
+            roiHeight = roiHeight,
+            marginX = marginX,
+            pawnCenterX = pawnCenterX,
+            pawnBaseY = pawnBaseY,
+            pawnWidthEstimate = pawnWidthEstimate,
+            targetCenterX = pawnCenterX,
+            excludedRect = excludedRect,
+            thresholdSq = translucentThresholdSq
+        )
+
         var block = scanForTargetBlock(
             pixels = pixels,
             width = width,
@@ -228,7 +242,8 @@ object BlockVisionAnalyzer {
             rejectDarkShadows = true,
             requireSharpBoundary = true,
             allowShadowLeftOffset = false,
-            preferredTargetHint = preferredTargetHint
+            preferredTargetHint = preferredTargetHint,
+            sourcePlatform = preSourceStance
         )
 
         if (block != null) {
@@ -264,7 +279,8 @@ object BlockVisionAnalyzer {
                 minValidBlockHeight = minValidBlockHeight,
                 rejectDarkShadows = true,
                 requireSharpBoundary = true,
-                preferredTargetHint = preferredTargetHint
+                preferredTargetHint = preferredTargetHint,
+                sourcePlatform = preSourceStance
             )
         }
 
@@ -289,7 +305,8 @@ object BlockVisionAnalyzer {
                 rejectDarkShadows = true,
                 requireInternalContrast = true,
                 requireSharpBoundary = true,
-                preferredTargetHint = preferredTargetHint
+                preferredTargetHint = preferredTargetHint,
+                sourcePlatform = preSourceStance
             )
         }
 
@@ -554,6 +571,8 @@ object BlockVisionAnalyzer {
         val cellSize = max(12, width / 48)
         val cellBuckets = HashMap<Long, Pair<MutableList<Int>, MutableList<Int>>>()
 
+        val requireCoolChroma = targetB >= targetR + 12 && targetR < 110
+
         var y = 0
         while (y < roiHeight) {
             val rowOffset = y * width
@@ -568,18 +587,20 @@ object BlockVisionAnalyzer {
                         val r = (c shr 16) and 0xFF
                         val g = (c shr 8) and 0xFF
                         val b = c and 0xFF
-                        val dr = r - targetR
-                        val dg = g - targetG
-                        val db = b - targetB
-                        if (dr * dr + dg * dg + db * db <= pawnTolSq) {
-                            val gx = x / cellSize
-                            val gy = absY / cellSize
-                            val key = (gx.toLong() shl 32) or (gy.toLong() and 0xFFFFFFFFL)
-                            val pair = cellBuckets.getOrPut(key) {
-                                ArrayList<Int>(16) to ArrayList(16)
+                        if (!requireCoolChroma || (b - min(r, g)) >= 6) {
+                            val dr = r - targetR
+                            val dg = g - targetG
+                            val db = b - targetB
+                            if (dr * dr + dg * dg + db * db <= pawnTolSq) {
+                                val gx = x / cellSize
+                                val gy = absY / cellSize
+                                val key = (gx.toLong() shl 32) or (gy.toLong() and 0xFFFFFFFFL)
+                                val pair = cellBuckets.getOrPut(key) {
+                                    ArrayList<Int>(16) to ArrayList(16)
+                                }
+                                pair.first.add(x)
+                                pair.second.add(absY)
                             }
-                            pair.first.add(x)
-                            pair.second.add(absY)
                         }
                     }
                 }
@@ -774,10 +795,16 @@ object BlockVisionAnalyzer {
         val maxConeHalfW = (width * 0.044f).roundToInt()
         val maxConeRowWidth = (width * 0.068f).roundToInt()
 
+        val requireCoolChroma = targetB >= targetR + 12 && targetR < 110
+
         fun matchesPawn(px: Int): Boolean {
-            val dr = ((px shr 16) and 0xFF) - targetR
-            val dg = ((px shr 8) and 0xFF) - targetG
-            val db = (px and 0xFF) - targetB
+            val r = (px shr 16) and 0xFF
+            val g = (px shr 8) and 0xFF
+            val b = px and 0xFF
+            if (requireCoolChroma && (b - min(r, g)) < 6) return false
+            val dr = r - targetR
+            val dg = g - targetG
+            val db = b - targetB
             return dr * dr + dg * dg + db * db <= pawnTolSq
         }
 
@@ -1065,7 +1092,8 @@ object BlockVisionAnalyzer {
         requireInternalContrast: Boolean = false,
         requireSharpBoundary: Boolean = false,
         allowShadowLeftOffset: Boolean = false,
-        preferredTargetHint: PointF2D? = null
+        preferredTargetHint: PointF2D? = null,
+        sourcePlatform: SourcePlatformStance? = null
     ): BlockTrace? {
         val maxBlockScanY = (pawnBaseY - roiTop - 10).roundToInt().coerceIn(0, roiHeight - 1)
         val maxValidBlockWidth = (width * 0.45f).roundToInt()
@@ -1139,10 +1167,17 @@ object BlockVisionAnalyzer {
             } else {
                 max(minValidBlockHeight, (width * 0.040f).roundToInt())
             }
+            val overlapsSourceTop = sourcePlatform != null &&
+                sourcePlatform.widthPx >= minValidBlockWidth &&
+                abs(centerX - sourcePlatform.centerX) < sourcePlatform.widthPx * 0.36f &&
+                (roiTop + traced.lastTopRowY) >= sourcePlatform.centerY - sourcePlatform.widthPx * 0.36f &&
+                centerY >= sourcePlatform.centerY - sourcePlatform.widthPx * 0.40f
+
             val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
                 cHeight >= effectiveMinHeight &&
                 distFromPawn >= width * 0.125f &&
                 !overlapsPawnBase &&
+                !overlapsSourceTop &&
                 dyAbs >= minVerticalClimb &&
                 dxAbs >= dyAbs * 0.90f &&
                 contrastOk &&
@@ -1332,18 +1367,36 @@ object BlockVisionAnalyzer {
             val tLeftBg = pixels[tOffset + marginX / 2]
             val tRightBg = pixels[tOffset + width - 1 - marginX / 2]
 
-            if (isExcluded(traceCenterX, absY, excludedRect)) {
+            val spanL: Int
+            val spanR: Int
+            if (cMaxTopWidth >= minValidBlockWidth / 2) {
+                spanL = (cWidestLeftX.roundToInt() - 10).coerceIn(marginX, width - marginX - 1)
+                spanR = (cWidestRightX.roundToInt() + 10).coerceIn(spanL, width - marginX - 1)
+            } else {
+                val halfSearch = max(10, cMaxTopWidth / 2 + 8)
+                spanL = (traceCenterX - halfSearch).coerceIn(marginX, width - marginX - 1)
+                spanR = (traceCenterX + halfSearch).coerceIn(spanL, width - marginX - 1)
+            }
+
+            var firstFgX = -1
+            var lastFgX = -1
+            var sx = spanL
+            while (sx <= spanR) {
+                if (!isExcluded(sx, absY, excludedRect) &&
+                    isValidBlockPixel(pixels[tOffset + sx], tLeftBg, tRightBg, sx, width, thresholdSq, rejectDarkShadows)
+                ) {
+                    if (firstFgX < 0) firstFgX = sx
+                    lastFgX = sx
+                }
+                sx++
+            }
+
+            if (firstFgX < 0) {
                 if (ty - startY > 6) break
                 continue
             }
 
-            val seedPx = pixels[tOffset + traceCenterX]
-            if (!isValidBlockPixel(seedPx, tLeftBg, tRightBg, traceCenterX, width, thresholdSq, rejectDarkShadows)) {
-                if (ty - startY > 6) break
-                continue
-            }
-
-            var lx = traceCenterX
+            var lx = firstFgX
             while (lx > marginX) {
                 if (isExcluded(lx - 1, absY, excludedRect)) break
                 val px = pixels[tOffset + lx - 1]
@@ -1351,7 +1404,7 @@ object BlockVisionAnalyzer {
                 lx--
             }
 
-            var rx = traceCenterX
+            var rx = lastFgX
             while (rx < width - marginX - 1) {
                 if (isExcluded(rx + 1, absY, excludedRect)) break
                 val px = pixels[tOffset + rx + 1]

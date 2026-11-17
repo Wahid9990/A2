@@ -68,6 +68,7 @@ class ScreenCaptureService : Service() {
     private var manualConfigEpoch = 0L
     @Volatile
     private var lastTouchdownSnapshot: BlockVisionAnalyzer.UpperRoiSnapshot? = null
+    private var consecutiveJitterRetries = 0
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -422,6 +423,7 @@ class ScreenCaptureService : Service() {
             }
             if (!lockedStable) {
                 if (!stableResult.pawnFound || !stableResult.blockFound) {
+                    consecutiveJitterRetries = 0
                     lastTouchdownSnapshot = null
                     AutomationBridge.updateAnalysis(stableResult)
                     AutomationBridge.updateTrainingBanner("Standby (waiting for game board...)")
@@ -435,16 +437,23 @@ class ScreenCaptureService : Service() {
                     return 260L
                 }
                 if (lastPawnDrift > 6f || lastDistDrift > 11f) {
-                    AutomationBridge.updateAnalysis(stableResult)
-                    AutomationBridge.updateVisionDebugStatus(
-                        VisionDebugStatus(
-                            phase = "WAITING_STABILITY",
-                            message = "Waiting settle: ΔD=${lastDistDrift.roundToInt()}px ΔP=${lastPawnDrift.roundToInt()}px",
-                            showTargetHighlight = true
+                    val minorAnimJitter = lastPawnDrift <= 18f && lastDistDrift <= 22f
+                    consecutiveJitterRetries = if (minorAnimJitter) consecutiveJitterRetries + 1 else 0
+                    if (consecutiveJitterRetries < 2) {
+                        AutomationBridge.updateAnalysis(stableResult)
+                        AutomationBridge.updateVisionDebugStatus(
+                            VisionDebugStatus(
+                                phase = "WAITING_STABILITY",
+                                message = "Waiting settle: ΔD=${lastDistDrift.roundToInt()}px ΔP=${lastPawnDrift.roundToInt()}px",
+                                showTargetHighlight = true
+                            )
                         )
-                    )
-                    return 100L
+                        return 100L
+                    }
                 }
+            }
+            if (lockedStable) {
+                consecutiveJitterRetries = 0
             }
         }
         lastTouchdownSnapshot = null
@@ -502,9 +511,11 @@ class ScreenCaptureService : Service() {
             if (postPause == null || !postPause.pawnFound || !postPause.blockFound) {
                 return 140L
             }
-            if (abs(postPause.rawDistancePx - stableResult.rawDistancePx) > 10f ||
-                abs(postPause.pawnCenterX - stableResult.pawnCenterX) > 7f
-            ) {
+            val distShift = abs(postPause.rawDistancePx - stableResult.rawDistancePx)
+            val pawnShift = abs(postPause.pawnCenterX - stableResult.pawnCenterX)
+            val largeShift = distShift > 26f || pawnShift > 16f
+            if (largeShift || ((distShift > 12f || pawnShift > 8f) && consecutiveJitterRetries < 2)) {
+                consecutiveJitterRetries = if (!largeShift) consecutiveJitterRetries + 1 else 0
                 AutomationBridge.updateAnalysis(postPause)
                 return 90L
             }
@@ -512,6 +523,7 @@ class ScreenCaptureService : Service() {
             stableDiag = postPausePair.second
             AutomationBridge.updateAnalysis(stableResult)
         }
+        consecutiveJitterRetries = 0
 
         if (stableResult.normalizedDistancePx !in 85f..940f) {
             AutomationBridge.updateVisionDebugStatus(

@@ -175,5 +175,28 @@ class RealGameScreenshotTest {
         }
         assertTrue("Score mismatches: $failures", failures.isEmpty())
     }
+
+    @Test
+    fun `analyzes user stall screenshot score 573 (teal-white cylinder over green floor)`() {
+        val bmp = loadWorkspaceImageOrSkip("public/assets/aistudio/Screenshot_20261117_235827_4fd83fcee830ed007aacc9cec66270f7_aeb20dca.jpg")
+        val hudRect = Rect(30, 145, 455, 430)
+        val res = BlockVisionAnalyzer.analyze(bmp, BotConfig(), excludedRect = hudRect)
+        println("STALL SHOT 573 => $res | score=${res.scoreReading}")
+        assertTrue("Pawn should be detected on 573 shot: ${res.statusMessage}", res.pawnFound)
+        assertTrue("Teal-white cylinder should be detected on 573 shot: ${res.statusMessage}", res.blockFound)
+        val bx = res.blockBounds?.center?.x ?: 0f
+        assertTrue("Cylinder center X should be around 490, got $bx", bx in 445f..540f)
+    }
+
+    @Test
+    fun `analyzes user stall screenshot score 68 (vinyl turntable + purple crown block)`() {
+        val bmp = loadWorkspaceImageOrSkip("public/assets/aistudio/Screenshot_20261117_235025_4fd83fcee830ed007aacc9cec66270f7_e25ad306.jpg")
+        val res = BlockVisionAnalyzer.analyze(bmp, BotConfig())
+        assertTrue("Pawn on vinyl turntable should be detected on 68 shot: ${res.statusMessage}", res.pawnFound)
+        assertTrue("Purple crown block should be detected on 68 shot: ${res.statusMessage}", res.blockFound)
+        val bx = res.blockBounds?.center?.x ?: 0f
+        assertTrue("Purple crown block center X should be around 215, got $bx", bx in 175f..265f)
+    }
 }
+
 
