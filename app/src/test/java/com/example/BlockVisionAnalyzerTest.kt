@@ -414,4 +414,39 @@ class BlockVisionAnalyzerTest {
         assertEquals("Net bias (-15 + 35) = +20ms should apply", 20L, sideWithBias.appliedContextBiasMs)
         assertEquals(sideNoBias.computedDurationMs + 20L, sideWithBias.computedDurationMs)
     }
+
+    @Test
+    fun `rejects Game Over popup overlay and bottom-edge brown phantom pawn artifacts`() {
+        val config = BotConfig(roiTopFraction = 0.28f, roiBottomFraction = 0.72f)
+        val w = 720
+        val h = 1600
+
+        // 1. Simulate Game Over modal card (#C6D4F4 + #FF7874 coral button + #5082B5 Replay button)
+        val modalBmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val modalCanvas = android.graphics.Canvas(modalBmp)
+        modalCanvas.drawColor(android.graphics.Color.rgb(0x46, 0x48, 0x8E))
+        val paint = android.graphics.Paint()
+        paint.color = android.graphics.Color.rgb(0xC6, 0xD4, 0xF4) // pale blue card
+        modalCanvas.drawRect(80f, 460f, 640f, 920f, paint)
+        paint.color = android.graphics.Color.rgb(0xFF, 0x78, 0x74) // coral close/share banner
+        modalCanvas.drawRect(440f, 520f, 680f, 680f, paint)
+        paint.color = android.graphics.Color.rgb(0x50, 0x82, 0xB5) // blue button right where #63 detected fake pawn
+        modalCanvas.drawRect(330f, 700f, 390f, 795f, paint)
+        val modalResult = BlockVisionAnalyzer.analyze(modalBmp, config)
+        modalBmp.recycle()
+        assertTrue("Game Over popup must not lock onto fake pawn", !modalResult.pawnFound)
+        assertTrue("Game Over popup must not fire jumps", !modalResult.blockFound)
+
+        // 2. Simulate normal sky with warm brown block corner at bottom-left margin (97, 1147, #68414A) + gold trim
+        val phantomBmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val phantomCanvas = android.graphics.Canvas(phantomBmp)
+        phantomCanvas.drawColor(android.graphics.Color.rgb(0x46, 0x48, 0x8E))
+        paint.color = android.graphics.Color.rgb(0x68, 0x41, 0x4A)
+        phantomCanvas.drawRect(65f, 1080f, 128f, 1152f, paint)
+        paint.color = android.graphics.Color.rgb(215, 170, 90)
+        phantomCanvas.drawRect(78f, 1105f, 118f, 1118f, paint)
+        val phantomResult = BlockVisionAnalyzer.analyze(phantomBmp, config)
+        phantomBmp.recycle()
+        assertTrue("Bottom-left brown artifact at (97, 1147) must not trigger false pawn lock", !phantomResult.pawnFound)
+    }
 }

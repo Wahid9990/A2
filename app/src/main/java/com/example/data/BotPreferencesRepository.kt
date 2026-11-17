@@ -47,7 +47,7 @@ class BotPreferencesRepository(private val context: Context) {
 
     private companion object {
         const val MIN_VALID_CALIB_VERSION = 7
-        const val CURRENT_CALIB_VERSION = 8
+        const val CURRENT_CALIB_VERSION = 9
         const val MAX_STORED_RECORDS = 60
     }
 
@@ -72,11 +72,26 @@ class BotPreferencesRepository(private val context: Context) {
         } else {
             rawCooldown
         }
-        val biases = decodeBiases(prefs[Keys.ADAPTIVE_BIASES_JSON])
+        val rawBiases = decodeBiases(prefs[Keys.ADAPTIVE_BIASES_JSON])
+        val biases = LinkedHashMap<String, Float>(rawBiases.size)
+        rawBiases.forEach { (k, v) ->
+            if (k != "BLK:MEDIUM") {
+                biases[k] = when {
+                    k.startsWith("SIG:MEDIUM_") -> v.coerceIn(-18f, 18f)
+                    k.startsWith("SIG:") -> v.coerceIn(-28f, 28f)
+                    k.startsWith("STANCE:") -> v.coerceIn(-40f, 40f)
+                    else -> v
+                }
+            }
+        }
+        val rawK = prefs[Keys.K_FACTOR] ?: defaults.kFactor
+        val rawB = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs
+        val migratedK = if (storedVersion < CURRENT_CALIB_VERSION && rawK < 1.335f) 1.355f else rawK
+        val migratedB = if (storedVersion < CURRENT_CALIB_VERSION && rawB < 41f) 42f else rawB
         return BotConfig(
             formulaMode = mode,
-            kFactor = prefs[Keys.K_FACTOR] ?: defaults.kFactor,
-            offsetMs = prefs[Keys.OFFSET_MS] ?: defaults.offsetMs,
+            kFactor = migratedK,
+            offsetMs = migratedB,
             quadFactor = prefs[Keys.QUAD_FACTOR] ?: defaults.quadFactor,
             pawnColorRgb = prefs[Keys.PAWN_COLOR_RGB] ?: defaults.pawnColorRgb,
             pawnColorTolerance = prefs[Keys.PAWN_COLOR_TOLERANCE] ?: defaults.pawnColorTolerance,

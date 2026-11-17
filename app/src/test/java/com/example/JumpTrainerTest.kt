@@ -468,4 +468,35 @@ class JumpTrainerTest {
         val nextMiniBias = JumpTrainer.computeContextAdjustmentMs(recovered, 346f, "MINI", "SLATE", "CENTER")
         assertTrue("OUT_UNKNOWN with pre-fall r=0.95 must recover upward ($outNote), got bias=$nextMiniBias", nextMiniBias >= 25L)
     }
+
+    @Test
+    fun `never stores BLK_MEDIUM bias and caps single OUT_FAR k drop`() {
+        val cfg = BotConfig(
+            kFactor = 1.326f,
+            offsetMs = 46f,
+            autoTrainEnabled = true,
+            adaptiveBiasesMs = mapOf("BLK:MEDIUM" to -37f, "BLK:MINI" to 15f)
+        )
+        assertEquals(
+            "BLK:MEDIUM must always be ignored as 0ms reference",
+            0L,
+            JumpTrainer.computeContextAdjustmentMs(cfg, 450f, "MEDIUM", "", "CENTER")
+        )
+        val (updated, note) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 732f,
+            holdMs = 1036L,
+            outcome = JumpOutcome.OUT_OVERSHOOT,
+            landingRatio = 1.49f,
+            history = emptyList(),
+            targetProfile = "MEDIUM",
+            targetColorGroup = "WHITE",
+            pawnStance = "SIDE_BACK"
+        )
+        assertTrue("Legacy BLK:MEDIUM must be removed ($note)", !updated.adaptiveBiasesMs.containsKey("BLK:MEDIUM"))
+        assertTrue(
+            "Single extreme OUT_FAR must cap k step to <= 0.022 (1.326 -> ${updated.kFactor})",
+            cfg.kFactor - updated.kFactor <= 0.0221f
+        )
+    }
 }

@@ -110,6 +110,28 @@ object BlockVisionAnalyzer {
         val marginX = max(8, (width * 0.03f).roundToInt())
         val bgThresholdSq = config.bgDiffThreshold * config.bgDiffThreshold * 3
 
+        if (isGameOverOrModalOverlay(pixels, width, roiHeight, marginX, excludedRect)) {
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000L
+            return VisionAnalysisResult(
+                imageWidth = width,
+                imageHeight = height,
+                roiTopY = roiTop.toFloat(),
+                roiBottomY = roiBottom.toFloat(),
+                pawnFound = false,
+                pawnCenterX = 0f,
+                pawnBaseY = 0f,
+                pawnPixelCount = 0,
+                blockFound = false,
+                blockBounds = null,
+                rawDistancePx = 0f,
+                normalizedDistancePx = 0f,
+                computedDurationMs = 0L,
+                safeMarginMs = 0L,
+                analysisTimeMs = elapsedMs,
+                statusMessage = "Game Over / popup overlay — waiting replay"
+            )
+        }
+
         // Step 1: Detect the Pawn using connected-component clustering + collar/silhouette scoring
         val pawn = detectPawn(
             pixels = pixels,
@@ -642,11 +664,19 @@ object BlockVisionAnalyzer {
                 cy += 2
             }
 
-            // Reject tiny UI artifacts / Game Over buttons / screen-edge modal cards lacking a golden collar
-            val clippedAtRoiBottom = maxY >= roiTop + roiHeight - 3
-            val extremeSideMargin = (minX + maxX) * 0.5f < width * 0.10f || (minX + maxX) * 0.5f > width * 0.90f
+            // Reject off-playfield edges, ROI-bottom clipped objects, or warm brown/orange non-pawn faces
+            val roiBottomLimit = roiTop + roiHeight - (width * 0.020f).roundToInt()
+            val clippedAtRoiBottom = maxY >= roiBottomLimit
+            val compCenterX = (minX + maxX) * 0.5f
+            val extremeSideMargin = compCenterX < width * 0.145f || compCenterX > width * 0.855f
+            if (clippedAtRoiBottom || extremeSideMargin) continue
             if (collarHits < 2 && compXs.size < max(75, width / 8)) continue
-            if (collarHits < 3 && (clippedAtRoiBottom || extremeSideMargin)) continue
+            if (collarHits < 3 && compXs.size < max(90, width / 7)) continue
+
+            val enforceCoolPurple = targetB >= targetR && targetR < 110
+            if (enforceCoolPurple && !hasCoolPurpleBodySignature(pixels, roiTop, width, compXs, compYs)) {
+                continue
+            }
 
             var score = compXs.size.coerceAtMost(2800)
             if (compW <= width * 0.09f) score += 1200
@@ -895,6 +925,14 @@ object BlockVisionAnalyzer {
                 if (py < pMinY) pMinY = py
                 if (py > pMaxY) pMaxY = py
             }
+
+            val candCx = (pMinX + pMaxX) * 0.5f
+            if (pMaxY >= roiTop + roiHeight - (width * 0.020f).roundToInt()) continue
+            if (candCx < width * 0.145f || candCx > width * 0.855f) continue
+            if (targetB >= targetR && targetR < 110 && !hasCoolPurpleBodySignature(pixels, roiTop, width, xs, ys)) {
+                continue
+            }
+
             val score = (xs.size * 2) + (goldHits * 180) + 4500
             val cand = PawnCandidate(
                 xs = xs,
@@ -912,6 +950,94 @@ object BlockVisionAnalyzer {
             }
         }
         return best
+    }
+
+    private fun hasCoolPurpleBodySignature(
+        pixels: IntArray,
+        roiTop: Int,
+        width: Int,
+        xs: List<Int>,
+        ys: List<Int>
+    ): Boolean {
+        if (xs.isEmpty()) return false
+        val stride = max(1, xs.size / 64)
+        var sumR = 0L
+        var sumG = 0L
+        var sumB = 0L
+        var count = 0
+        var i = 0
+        while (i < xs.size) {
+            val relY = ys[i] - roiTop
+            val px = pixels[relY * width + xs[i]]
+            sumR += (px shr 16) and 0xFF
+            sumG += (px shr 8) and 0xFF
+            sumB += px and 0xFF
+            count++
+            i += stride
+        }
+        if (count == 0) return false
+        val avgR = sumR / count
+        val avgG = sumG / count
+        val avgB = sumB / count
+        return avgR <= 104 && avgG <= 94 && avgB >= avgR - 4
+    }
+
+    private fun isGameOverOrModalOverlay(
+        pixels: IntArray,
+        width: Int,
+        roiHeight: Int,
+        marginX: Int,
+        excludedRect: Rect?
+    ): Boolean {
+        if (roiHeight < 40) return false
+        val leftCol = (marginX / 2).coerceIn(0, width - 1)
+        val rightCol = (width - 1 - marginX / 2).coerceIn(0, width - 1)
+        var marginDivergence = 0
+        var redCoralHits = 0
+        var paleBlueHits = 0
+        val probeFracs = floatArrayOf(0.05f, 0.14f, 0.24f, 0.34f, 0.44f, 0.54f)
+        for (f in probeFracs) {
+            val ry = (roiHeight * f).roundToInt().coerceIn(0, roiHeight - 1)
+            val rowOff = ry * width
+            val lp = pixels[rowOff + leftCol]
+            val rp = pixels[rowOff + rightCol]
+            if (colorDistSq(lp, rp) > 5500) {
+                marginDivergence++
+            }
+            for (c in intArrayOf(lp, rp)) {
+                val r = (c shr 16) and 0xFF
+                val g = (c shr 8) and 0xFF
+                val b = c and 0xFF
+                if (r > 215 && g in 80..145 && b < 145) redCoralHits++
+                if (r > 185 && g > 195 && b > 225) paleBlueHits++
+            }
+        }
+        if (redCoralHits >= 1 && paleBlueHits >= 1) return true
+        // Also check center upper ROI card paired with coral replay/close button when side margins happen to miss
+        if (marginDivergence >= 4) return true
+        val bandStartY = (roiHeight * 0.04f).roundToInt().coerceAtLeast(0)
+        val bandEndY = (roiHeight * 0.48f).roundToInt().coerceAtMost(roiHeight - 1)
+        var cardCoral = 0
+        var cardPaleBlue = 0
+        var y = bandStartY
+        while (y <= bandEndY) {
+            val rowOff = y * width
+            var x = (width * 0.22f).roundToInt()
+            val xEnd = (width * 0.85f).roundToInt()
+            while (x <= xEnd) {
+                if (!isExcluded(x, 0, excludedRect)) {
+                    val c = pixels[rowOff + x]
+                    val r = (c shr 16) and 0xFF
+                    val g = (c shr 8) and 0xFF
+                    val b = c and 0xFF
+                    if (r > 220 && g in 85..140 && b in 80..140) cardCoral++
+                    if (r in 185..215 && g in 200..228 && b > 232) cardPaleBlue++
+                }
+                x += 24
+            }
+            y += 20
+        }
+        return cardCoral >= 8 && cardPaleBlue >= 10
     }
 
     private fun scanForTargetBlock(
@@ -1012,7 +1138,7 @@ object BlockVisionAnalyzer {
                 distFromPawn >= width * 0.15f &&
                 !overlapsPawnBase &&
                 dyAbs >= minVerticalClimb &&
-                dxAbs >= dyAbs * 0.25f &&
+                dxAbs >= dyAbs * 0.58f &&
                 contrastOk &&
                 sharpBoundaryOk
 

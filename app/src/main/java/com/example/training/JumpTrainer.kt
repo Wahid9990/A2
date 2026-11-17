@@ -20,9 +20,9 @@ object JumpTrainer {
     private const val MAX_B = 75f
     private const val ANCHOR_K = 1.38f
     private const val MAX_NON_FATAL_K_STEP = 0.014f
-    private const val MAX_FATAL_K_STEP = 0.038f
-    private const val MAX_CONTEXT_BIAS_MS = 120f
-    private const val MAX_MISTAKE_GUARD_MS = 100f
+    private const val MAX_FATAL_K_STEP = 0.022f
+    private const val MAX_CONTEXT_BIAS_MS = 105f
+    private const val MAX_MISTAKE_GUARD_MS = 90f
     private const val MAX_STORED_BIASES = 48
 
     fun distBucket(dNorm: Float): Int = ((dNorm / 50f).roundToInt() * 50).coerceIn(100, 1200)
@@ -52,7 +52,11 @@ object JumpTrainer {
         val biases = config.adaptiveBiasesMs
         if (biases.isEmpty()) return 0L
 
-        val blkBias = biases[profileKey(targetBlockProfile)] ?: 0f
+        val blkBias = if (targetBlockProfile == "MEDIUM" || targetBlockProfile.isBlank()) {
+            0f
+        } else {
+            biases[profileKey(targetBlockProfile)] ?: 0f
+        }
         val sigKey = signatureKey(targetBlockProfile, targetColorGroup)
         val sigBias = if (sigKey.isNotEmpty()) (biases[sigKey] ?: 0f) * 0.85f else 0f
         val stKey = stanceKey(pawnStance)
@@ -180,18 +184,18 @@ object JumpTrainer {
         when {
             outcome == JumpOutcome.OUT_SHORT -> {
                 if (landingRatio != null && landingRatio in 0.45f..0.95f) {
-                    val safeRatio = landingRatio.coerceIn(0.68f, 0.92f)
+                    val safeRatio = landingRatio.coerceIn(0.72f, 0.92f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
-                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.50f).coerceAtLeast(22f)
+                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.45f).coerceIn(18f, 40f)
                     learnedErrorMs = deltaMs
-                    newK += ((deltaMs * globalShare) * 0.85f) / dNorm.coerceAtLeast(150f)
-                    newB += (deltaMs * globalShare) * 0.15f
+                    newK += ((deltaMs * globalShare) * 0.80f) / dNorm.coerceAtLeast(180f)
+                    newB += (deltaMs * globalShare) * 0.20f
                     note = String.format(Locale.US, "Out-short LMS r=%.2f +%.0fms", landingRatio, deltaMs)
                 } else {
-                    learnedErrorMs = 36f
-                    newK += 0.045f * globalShare
-                    newB += 6f * globalShare
+                    learnedErrorMs = 32f
+                    newK += 0.022f * globalShare
+                    newB += 3f * globalShare
                     note = "Out-short guard (+k,+b)"
                 }
             }
@@ -199,18 +203,18 @@ object JumpTrainer {
             outcome == JumpOutcome.OUT_OVERSHOOT -> {
                 allowLargeRecovery = true
                 if (landingRatio != null && landingRatio in 1.06f..1.65f) {
-                    val safeRatio = landingRatio.coerceIn(1.07f, 1.45f)
+                    val safeRatio = landingRatio.coerceIn(1.07f, 1.32f)
                     val idealHoldMs = (holdMs.toFloat() / safeRatio)
                         .coerceIn(config.minPressMs.toFloat(), config.maxPressMs.toFloat())
-                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.52f).coerceAtMost(-24f)
+                    val deltaMs = ((idealHoldMs - holdMs.toFloat()) * 0.42f).coerceIn(-40f, -20f)
                     learnedErrorMs = deltaMs
-                    newK += ((deltaMs * globalShare) * 0.85f) / dNorm.coerceAtLeast(150f)
-                    newB += (deltaMs * globalShare) * 0.15f
+                    newK += ((deltaMs * globalShare) * 0.80f) / dNorm.coerceAtLeast(180f)
+                    newB += (deltaMs * globalShare) * 0.20f
                     note = String.format(Locale.US, "Out-far LMS r=%.2f %.0fms", landingRatio, deltaMs)
                 } else {
-                    learnedErrorMs = -42f
-                    newK -= 0.055f * globalShare
-                    newB -= 6f * globalShare
+                    learnedErrorMs = -34f
+                    newK -= 0.022f * globalShare
+                    newB -= 3f * globalShare
                     note = "Out-far guard (-k,-b)"
                 }
             }
@@ -306,7 +310,8 @@ object JumpTrainer {
             }
         }
 
-        // Propagate contextual bias to Block Shape, Block Color Signature, Pawn Stance, and Spot Mistake Guard
+        // Keep MEDIUM as the pure 0ms baseline reference; only learn BLK: shape biases for MINI/NARROW/WIDE
+        newBiases.remove("BLK:MEDIUM")
         if (abs(learnedErrorMs) >= 3f) {
             val ctxWeight = when {
                 isMiniBlock -> 0.90f
@@ -315,19 +320,22 @@ object JumpTrainer {
             }
             val ctxDelta = learnedErrorMs * ctxWeight
 
-            val blkShare = when {
-                isMiniBlock && (stKey.isEmpty() || pawnStance == "CENTER") -> 0.78f
-                isMiniBlock -> 0.55f
-                stKey.isNotEmpty() && pawnStance != "CENTER" -> 0.45f
-                else -> 0.65f
+            if (targetProfile != "MEDIUM") {
+                val blkShare = when {
+                    isMiniBlock && (stKey.isEmpty() || pawnStance == "CENTER") -> 0.78f
+                    isMiniBlock -> 0.55f
+                    stKey.isNotEmpty() && pawnStance != "CENTER" -> 0.45f
+                    else -> 0.65f
+                }
+                val blkCap = if (isMiniBlock) 90f else 65f
+                val curBlk = newBiases[pKey] ?: 0f
+                newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-blkCap, blkCap)
             }
-            val blkCap = if (isMiniBlock) 90f else 75f
-            val curBlk = newBiases[pKey] ?: 0f
-            newBiases[pKey] = (curBlk + ctxDelta * blkShare).coerceIn(-blkCap, blkCap)
 
             if (sKey.isNotEmpty()) {
+                val sigCap = if (targetProfile == "MEDIUM") 18f else 28f
                 val curSig = newBiases[sKey] ?: 0f
-                newBiases[sKey] = (curSig + ctxDelta * 0.22f).coerceIn(-42f, 42f)
+                newBiases[sKey] = (curSig + ctxDelta * 0.20f).coerceIn(-sigCap, sigCap)
             }
 
             if (stKey.isNotEmpty() && pawnStance != "CENTER") {
