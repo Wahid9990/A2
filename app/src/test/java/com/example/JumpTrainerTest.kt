@@ -592,6 +592,34 @@ class JumpTrainerTest {
             miniBiasAfter >= 4f
         )
     }
+
+    @Test
+    fun `plus-1pt edge trim heals opposing stale MIST bias`() {
+        val cfg = BotConfig(
+            kFactor = 1.392f,
+            offsetMs = 43f,
+            autoTrainEnabled = true,
+            adaptiveBiasesMs = mapOf("MIST:NARROW:SIDE_EDGE:d300" to -15f)
+        )
+        val (updated, note) = JumpTrainer.applyOnlineUpdate(
+            config = cfg,
+            dNorm = 292f,
+            holdMs = 424L,
+            outcome = JumpOutcome.CENTER,
+            landingRatio = 0.92f,
+            history = emptyList(),
+            targetProfile = "NARROW",
+            targetColorGroup = "PINK",
+            pawnStance = "SIDE_EDGE",
+            scoreDelta = 1
+        )
+        val healedMist = updated.adaptiveBiasesMs["MIST:NARROW:SIDE_EDGE:d300"] ?: 0f
+        assertTrue(
+            "Short +1pt (r=0.92) should heal opposing -15ms MIST toward 0, got $healedMist ($note)",
+            healedMist > -12f
+        )
+    }
 }
+
 
 

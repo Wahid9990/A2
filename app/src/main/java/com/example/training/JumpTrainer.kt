@@ -412,6 +412,11 @@ object JumpTrainer {
                 val mistDelta = if (isFatalOut) learnedErrorMs.coerceIn(-65f, 65f) else (learnedErrorMs * 0.45f)
                 val curMist = newBiases[mKey] ?: 0f
                 newBiases[mKey] = (curMist + mistDelta).coerceIn(-MAX_MISTAKE_GUARD_MS, MAX_MISTAKE_GUARD_MS)
+            } else if (singlePointOffCenter) {
+                val curMist = newBiases[mKey]
+                if (curMist != null && curMist * learnedErrorMs < 0f) {
+                    newBiases[mKey] = (curMist + learnedErrorMs * 0.55f).coerceIn(-MAX_MISTAKE_GUARD_MS, MAX_MISTAKE_GUARD_MS)
+                }
             }
         }
 

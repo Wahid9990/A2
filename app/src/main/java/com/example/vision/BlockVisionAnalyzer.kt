@@ -201,9 +201,9 @@ object BlockVisionAnalyzer {
         val pawnExclusionRadius = max((pawnWidthEstimate * 1.35f).roundToInt(), (width * 0.08f).roundToInt())
 
         // Step 2: Three-pass target block detection (opaque, translucent/glass, and subtle background-matching blocks)
-        val minRunLength = max(6, (width * 0.014f).roundToInt())
-        val minValidBlockWidth = max(56, (width * 0.095f).roundToInt())
-        val minValidBlockHeight = max(22, (height * 0.015f).roundToInt())
+        val minRunLength = max(5, (width * 0.010f).roundToInt())
+        val minValidBlockWidth = max(40, (width * 0.058f).roundToInt())
+        val minValidBlockHeight = max(16, (height * 0.011f).roundToInt())
         val translucentThreshold = max(12, (config.bgDiffThreshold * 0.36f).roundToInt())
         val translucentThresholdSq = translucentThreshold * translucentThreshold * 3
         val subtleThreshold = max(8, (config.bgDiffThreshold * 0.24f).roundToInt())
@@ -530,7 +530,7 @@ object BlockVisionAnalyzer {
                 }
             }
         }
-        if (hits < 12) return null
+        if (hits < 6) return null
         return PointF2D((sumX / hits).toFloat(), (sumY / hits).toFloat())
     }
 
@@ -825,7 +825,7 @@ object BlockVisionAnalyzer {
                 }
             }
 
-            if (goldHits < 3) continue
+            if (goldHits < 4) continue
             if ((gMaxX - gMinX) > maxCollarW || (gMaxRelY - gMinRelY) > maxCollarH) continue
 
             val collarCx = (goldSumX.toFloat() / goldHits).roundToInt()
@@ -916,7 +916,7 @@ object BlockVisionAnalyzer {
                 cy += 2
             }
 
-            if (headHits < 6 || coneHits < 8) continue
+            if (headHits < 9 || coneHits < 12 || xs.size < 42) continue
 
             var pMinX = Int.MAX_VALUE
             var pMaxX = Int.MIN_VALUE
@@ -984,7 +984,7 @@ object BlockVisionAnalyzer {
         val avgR = sumR / count
         val avgG = sumG / count
         val avgB = sumB / count
-        return avgR <= 104 && avgG <= 94 && avgB >= avgR - 4
+        return avgR <= 102 && avgG <= 92 && avgB >= avgR + 6 && (avgB - avgG) >= 8
     }
 
     private fun isGameOverOrModalOverlay(
@@ -1141,10 +1141,10 @@ object BlockVisionAnalyzer {
             }
             val validGeometry = traced.maxTopWidth in minValidBlockWidth..maxValidBlockWidth &&
                 cHeight >= effectiveMinHeight &&
-                distFromPawn >= width * 0.15f &&
+                distFromPawn >= width * 0.125f &&
                 !overlapsPawnBase &&
                 dyAbs >= minVerticalClimb &&
-                dxAbs >= dyAbs * 0.58f &&
+                dxAbs >= dyAbs * 0.90f &&
                 contrastOk &&
                 sharpBoundaryOk
 
@@ -1162,11 +1162,10 @@ object BlockVisionAnalyzer {
                 val isoRatio = dxAbs / dyAbs.coerceAtLeast(1f)
                 val isoBonus = when {
                     isoRatio in 1.25f..1.95f -> 500f
-                    isoRatio in 0.85f..2.20f -> 380f
-                    isoRatio in 0.35f..0.85f -> 180f
-                    else -> 0f
+                    isoRatio in 0.95f..2.20f -> 380f
+                    else -> 120f
                 }
-                val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.42f).roundToInt()) 150f else 0f
+                val sizeBonus = if (traced.maxTopWidth in (width * 0.18f).roundToInt()..(width * 0.42f).roundToInt()) 45f else 0f
                 val hintBonus = if (preferredTargetHint != null &&
                     hypot(centerX - preferredTargetHint.x, centerY - preferredTargetHint.y) <= width * 0.18f
                 ) 320f else 0f
@@ -1188,7 +1187,6 @@ object BlockVisionAnalyzer {
             val rightBg = pixels[rowOffset + width - 1 - marginX / 2]
 
             var runStart = -1
-            var runCount = 0
 
             var x = marginX
             while (x < width - marginX) {
@@ -1205,20 +1203,18 @@ object BlockVisionAnalyzer {
                 )
                 if (isFg) {
                     if (runStart < 0) runStart = x
-                    runCount++
                 } else {
-                    if (runCount >= minRunLength) {
+                    if (runStart >= 0 && (x - runStart) >= minRunLength) {
                         evaluateRun(ry, (runStart + (x - step)) / 2f)
                     }
                     runStart = -1
-                    runCount = 0
                 }
                 x += step
             }
-            if (runCount >= minRunLength) {
+            if (runStart >= 0 && ((width - marginX) - runStart) >= minRunLength) {
                 evaluateRun(ry, (runStart + (width - marginX)) / 2f)
             }
-            ry += 3
+            ry += 2
         }
         return bestBlock
     }
@@ -1260,22 +1256,25 @@ object BlockVisionAnalyzer {
         allowShadowLeftOffset: Boolean = false
     ): Boolean {
         val apexX = traced.apexX.roundToInt().coerceIn(8, width - 9)
+        val insetH = (traced.maxTopWidth / 4).coerceIn(5, 10)
+        val insideApexOffset = (traced.lastTopRowY - traced.apexY).coerceIn(5, 12)
         val aboveApexY = (traced.apexY - 10).coerceIn(0, roiHeight - 1)
-        val insideApexY = (traced.apexY + 12).coerceIn(0, roiHeight - 1)
+        val insideApexY = (traced.apexY + insideApexOffset).coerceIn(0, roiHeight - 1)
+        val apexProbeOffset = min(6, insetH)
         val apexJump = maxOf(
             colorDistSq(pixels[aboveApexY * width + apexX], pixels[insideApexY * width + apexX]),
-            colorDistSq(pixels[aboveApexY * width + (apexX - 6)], pixels[insideApexY * width + (apexX - 6)]),
-            colorDistSq(pixels[aboveApexY * width + (apexX + 6)], pixels[insideApexY * width + (apexX + 6)])
+            colorDistSq(pixels[aboveApexY * width + (apexX - apexProbeOffset)], pixels[insideApexY * width + (apexX - apexProbeOffset)]),
+            colorDistSq(pixels[aboveApexY * width + (apexX + apexProbeOffset)], pixels[insideApexY * width + (apexX + apexProbeOffset)])
         )
         if (apexJump < 180) return false
 
         val leftX = traced.widestLeftX.roundToInt()
         val rightX = traced.widestRightX.roundToInt()
         val outLeftX = (leftX - 10).coerceIn(marginX / 2, width - 1)
-        val inLeftX = (leftX + 10).coerceIn(0, width - 1)
-        val inLeftDeepX = (leftX + 24).coerceIn(0, width - 1)
+        val inLeftX = (leftX + insetH).coerceIn(0, width - 1)
+        val inLeftDeepX = (leftX + max(insetH + 8, 22)).coerceIn(0, width - 1)
         val outRightX = (rightX + 10).coerceIn(0, width - 1 - marginX / 2)
-        val inRightX = (rightX - 10).coerceIn(0, width - 1)
+        val inRightX = (rightX - insetH).coerceIn(0, width - 1)
 
         val rowA = traced.widestRowY.coerceIn(0, roiHeight - 1)
         val rowB = (traced.widestRowY + 8).coerceIn(0, roiHeight - 1)
@@ -1580,7 +1579,7 @@ object BlockVisionAnalyzer {
     ): SourcePlatformStance {
         val scanStartRel = (pawnBaseY - roiTop - width * 0.08f).roundToInt().coerceIn(0, roiHeight - 1)
         val scanEndRel = (pawnBaseY - roiTop + width * 0.12f).roundToInt().coerceIn(scanStartRel, roiHeight - 1)
-        val minSrcW = max((width * 0.095f).roundToInt(), (pawnWidthEstimate * 1.65f).roundToInt())
+        val minSrcW = max(max(40, (width * 0.058f).roundToInt()), (pawnWidthEstimate * 1.45f).roundToInt())
         val maxSrcW = (width * 0.46f).roundToInt()
         val maxHalfTravel = (width * 0.34f).roundToInt()
         val bridgeHalf = max(16, (pawnWidthEstimate * 0.72f).roundToInt())
@@ -1667,8 +1666,8 @@ object BlockVisionAnalyzer {
                 if (ry < topSurfaceRelY) {
                     topSurfaceRelY = ry
                 }
-                // Stop widening if it suddenly bleeds into an unrelated background object (> 8% screen jump)
-                val spikeLimit = if (bestWidth >= minSrcW) bestWidth + (width * 0.08f).roundToInt() else maxSrcW
+                // Stop widening if it suddenly bleeds into an unrelated background object (> 10% screen jump after solid core)
+                val spikeLimit = if (bestWidth >= (width * 0.14f).roundToInt()) bestWidth + (width * 0.10f).roundToInt() else maxSrcW
                 if (rowW in minSrcW..min(maxSrcW, spikeLimit) && rowW > bestWidth + 3) {
                     bestWidth = rowW
                     bestLeftX = lx.toFloat()

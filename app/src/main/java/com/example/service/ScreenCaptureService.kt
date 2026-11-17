@@ -600,8 +600,9 @@ class ScreenCaptureService : Service() {
         // Flush any frame from during the hold so post-jump burst captures the real touchdown
         clearCachedFrame()
 
-        // Sample right at touchdown (490ms & 570ms) before the camera pan slides the pawn back toward 0.0
-        delay(490L)
+        // Sample right at touchdown (scaled by jump duration) before camera pan slides the pawn back toward 0.0
+        val burst1DelayMs = (370L + (holdMs * 0.14f).roundToLong()).coerceIn(405L, 500L)
+        delay(burst1DelayMs)
         val burst1 = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = false)?.first
         val r1 = JumpTrainer.computeLandingRatio(stableResult, burst1)
 
@@ -623,7 +624,8 @@ class ScreenCaptureService : Service() {
 
         // Wait remaining cooldown for camera pan / Game Over popup to finish settling
         val cooldownJitter = if (config.humanizeTiming) kotlin.random.Random.nextLong(-45L, 165L) else 0L
-        val remainingCooldown = (config.jumpCooldownMs - 570L + cooldownJitter).coerceAtLeast(320L)
+        val elapsedWaitMs = burst1DelayMs + 80L
+        val remainingCooldown = (config.jumpCooldownMs - elapsedWaitMs + cooldownJitter).coerceAtLeast(320L)
         delay(remainingCooldown)
         val postSettled = analyzeLatestFrameWithDiag(config, overlayRect, allowCached = true)?.first
 

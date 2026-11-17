@@ -535,5 +535,123 @@ class BlockVisionAnalyzerTest {
             centerOffsetRatio <= 0.34f && kotlin.math.abs(bounds.center.y - tCy) <= 10f
         )
     }
+
+    @Test
+    fun `detects ultra-small 48px target block cleanly even when distant large block is visible`() {
+        val w = 720
+        val h = 1600
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        canvas.drawColor(android.graphics.Color.rgb(0x46, 0x4F, 0x82))
+
+        val blkPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        // Current platform at (220, 950)
+        val curCx = 220f
+        val curCy = 950f
+        val curTop = android.graphics.Path().apply {
+            moveTo(curCx, curCy - 60f); lineTo(curCx + 120f, curCy); lineTo(curCx, curCy + 60f); lineTo(curCx - 120f, curCy); close()
+        }
+        val curBody = android.graphics.Path().apply {
+            moveTo(curCx - 120f, curCy); lineTo(curCx, curCy + 60f); lineTo(curCx + 120f, curCy)
+            lineTo(curCx + 120f, curCy + 85f); lineTo(curCx, curCy + 145f); lineTo(curCx - 120f, curCy + 85f); close()
+        }
+        blkPaint.color = android.graphics.Color.rgb(22, 130, 145); canvas.drawPath(curBody, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(245, 245, 245); canvas.drawPath(curTop, blkPaint)
+
+        // Pawn on current block
+        val pawnPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.rgb(0x3E, 0x33, 0x53)
+        }
+        val bodyPath = android.graphics.Path().apply {
+            moveTo(curCx - 14f, curCy - 12f); lineTo(curCx + 14f, curCy - 12f)
+            lineTo(curCx + 9f, curCy - 52f); lineTo(curCx - 9f, curCy - 52f); close()
+        }
+        canvas.drawPath(bodyPath, pawnPaint)
+        canvas.drawOval(curCx - 16f, curCy - 18f, curCx + 16f, curCy - 4f, pawnPaint)
+        val collarPaint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.rgb(210, 175, 98) }
+        canvas.drawOval(curCx - 12f, curCy - 60f, curCx + 12f, curCy - 50f, collarPaint)
+        canvas.drawCircle(curCx, curCy - 72f, 12f, pawnPaint)
+
+        // Ultra-small 48px target block along 30° up-right at (405, 842)
+        val smallCx = 405f
+        val smallCy = 842f
+        val smallW = 48f
+        val smallH = 26f
+        blkPaint.color = android.graphics.Color.rgb(40, 165, 175)
+        canvas.drawRect(smallCx - 24f, smallCy, smallCx + 24f, smallCy + 56f, blkPaint)
+        blkPaint.color = android.graphics.Color.rgb(252, 232, 130)
+        canvas.drawOval(smallCx - smallW / 2f, smallCy - smallH / 2f, smallCx + smallW / 2f, smallCy + smallH / 2f, blkPaint)
+
+        // Distant large block further away at (590, 620) that must NOT steal focus from the close 48px block
+        val bigCx = 590f
+        val bigCy = 620f
+        val bigTop = android.graphics.Path().apply {
+            moveTo(bigCx, bigCy - 60f); lineTo(bigCx + 115f, bigCy); lineTo(bigCx, bigCy + 60f); lineTo(bigCx - 115f, bigCy); close()
+        }
+        blkPaint.color = android.graphics.Color.rgb(210, 140, 235)
+        canvas.drawPath(bigTop, blkPaint)
+
+        val result = BlockVisionAnalyzer.analyze(bmp, BotConfig(roiTopFraction = 0.28f, roiBottomFraction = 0.72f))
+        bmp.recycle()
+
+        assertTrue("Pawn should be detected", result.pawnFound)
+        assertTrue("Ultra-small 48px block should be detected", result.blockFound)
+        val blk = result.blockBounds!!
+        assertEquals("Should classify 48px target as MINI", "MINI", result.targetBlockProfile)
+        assertTrue(
+            "Should lock onto close 48px target around x=405, got x=${blk.center.x} w=${blk.widthPx}",
+            kotlin.math.abs(blk.center.x - smallCx) <= 12f && kotlin.math.abs(blk.center.y - smallCy) <= 10f
+        )
+    }
+
+    @Test
+    fun `rejects steep off-axis block above pawn and neutral gray false pawn`() {
+        val w = 720
+        val h = 1600
+        val bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bmp)
+        canvas.drawColor(android.graphics.Color.rgb(0x46, 0x4F, 0x82))
+
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        // Draw pawn cleanly at (470, 897) on right platform
+        val px = 470f
+        val py = 897f
+        paint.color = android.graphics.Color.rgb(22, 130, 145)
+        canvas.drawOval(px - 80f, py - 35f, px + 80f, py + 45f, paint)
+        paint.color = android.graphics.Color.rgb(0x3E, 0x33, 0x53)
+        canvas.drawOval(px - 15f, py - 18f, px + 15f, py - 3f, paint)
+        canvas.drawRect(px - 10f, py - 52f, px + 10f, py - 12f, paint)
+        paint.color = android.graphics.Color.rgb(210, 175, 98)
+        canvas.drawOval(px - 12f, py - 60f, px + 12f, py - 50f, paint)
+        paint.color = android.graphics.Color.rgb(0x3E, 0x33, 0x53)
+        canvas.drawCircle(px, py - 72f, 12f, paint)
+
+        // Draw a steep impossible off-axis cyan block at (544, 776) (dx=+74, dy=-121, ratio=0.61)
+        val bx = 544f
+        val by = 776f
+        val steepTop = android.graphics.Path().apply {
+            moveTo(bx, by - 44f); lineTo(bx + 84f, by); lineTo(bx, by + 44f); lineTo(bx - 84f, by); close()
+        }
+        paint.color = android.graphics.Color.rgb(0x2C, 0xB4, 0xC0)
+        canvas.drawPath(steepTop, paint)
+
+        val res = BlockVisionAnalyzer.analyze(bmp, BotConfig(roiTopFraction = 0.28f, roiBottomFraction = 0.72f))
+        bmp.recycle()
+        assertTrue("Pawn should be detected", res.pawnFound)
+        assertTrue("Steep off-axis target dx=74 dy=-121 must be rejected, got ${res.blockBounds}", !res.blockFound)
+
+        // Now verify a neutral gray #8B8B8B block with a yellow dot does NOT falsely lock as a pawn
+        val grayBmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+        val grayCanvas = android.graphics.Canvas(grayBmp)
+        grayCanvas.drawColor(android.graphics.Color.rgb(0x46, 0x4F, 0x82))
+        paint.color = android.graphics.Color.rgb(0x8B, 0x8B, 0x8B)
+        grayCanvas.drawRect(445f, 830f, 495f, 898f, paint)
+        paint.color = android.graphics.Color.rgb(215, 170, 80)
+        grayCanvas.drawRect(460f, 838f, 480f, 848f, paint)
+        val grayRes = BlockVisionAnalyzer.analyze(grayBmp, BotConfig(roiTopFraction = 0.28f, roiBottomFraction = 0.72f))
+        grayBmp.recycle()
+        assertTrue("Neutral gray #8B8B8B artifact must not trigger fake pawn lock", !grayRes.pawnFound)
+    }
 }
+
 
